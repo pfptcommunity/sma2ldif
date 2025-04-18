@@ -94,18 +94,45 @@ proxyAddresses: 1002d@foo.com
 ### Usage
 
 ```
-usage: sma2ldif [-h] -i <aliases> -o <ldif> -d <domain> [<domain> ...] [-g <group> [<group> ...]] [--log-level {debug,info,warning,error,critical}] [-l LOG_FILE] [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT]
+usage: sma2ldif -i <aliases> -o <ldif> -d <domain> [<domain> ...]
+                [-g <group> [<group> ...]]
+                [--log-level {debug,info,warning,error,critical}]
+                [-l LOG_FILE] [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT] [-h]
 
 Convert Sendmail alias files to Proofpoint LDIF format.
 
-optional arguments:
-  -h, --help                                                     show this help message and exit
-  -i <aliases>, --input <aliases>                                Path to the input Sendmail aliases file.
-  -o <ldif>, --output <ldif>                                     Path to the output LDIF file.
-  -d <domain> [<domain> ...], --domains <domain> [<domain> ...]  List of domains for alias processing (first domain is primary).
-  -g <group> [<group> ...], --groups <group> [<group> ...]       List of memberOf groups for alias processing.
-  --log-level {debug,info,warning,error,critical}                Set the logging level (default: warning).
-  -l LOG_FILE, --log-file LOG_FILE                               Set the log file location (default: sma2ldif.log).
-  -s LOG_MAX_SIZE, --log-max-size LOG_MAX_SIZE                   Maximum size of log file in bytes before rotation (default: 10485760).
-  -c LOG_BACKUP_COUNT, --log-backup-count LOG_BACKUP_COUNT       Number of backup log files to keep (default: 5).
+Required Arguments:
+  -i <aliases>, --input <aliases>                         Path to the input
+                                                          Sendmail aliases
+                                                          file.
+  -o <ldif>, --output <ldif>                              Path to the output
+                                                          LDIF file.
+  -d <domain> [<domain> ...], --domains <domain> [<domain> ...]
+                                                          List of domains for
+                                                          alias processing
+                                                          (first domain is
+                                                          primary).
+
+Optional Arguments:
+  -g <group> [<group> ...], --groups <group> [<group> ...]
+                                                          List of memberOf
+                                                          groups for LDIF
+                                                          entries (default:
+                                                          none).
+  --log-level {debug,info,warning,error,critical}         Set the logging
+                                                          level (default:
+                                                          warning).
+  -l LOG_FILE, --log-file LOG_FILE                        Set the log file
+                                                          location (default:
+                                                          sma2ldif.log).
+  -s LOG_MAX_SIZE, --log-max-size LOG_MAX_SIZE            Maximum size of log
+                                                          file in bytes before
+                                                          rotation (default:
+                                                          10485760).
+  -c LOG_BACKUP_COUNT, --log-backup-count LOG_BACKUP_COUNT
+                                                          Number of backup log
+                                                          files to keep
+                                                          (default: 5).
+  -h, --help                                              Show this help
+                                                          message and exit.
 ```
