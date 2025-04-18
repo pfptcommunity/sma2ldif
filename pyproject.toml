@@ -25,4 +25,4 @@ repository = "https://github.com/pfptcommunity/sma2ldif"
 #changelog = "https://github.com/pfptcommunity/sma2ldif"
 
 [project.scripts]
-senderstats = "main"
+senderstats = "sma2ldif:main"
