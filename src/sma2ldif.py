@@ -4,15 +4,17 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from time import localtime
 from typing import Dict, List, Set, Optional
 
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
 
 # Constants
 DEFAULT_LOG_LEVEL = "warning"
-DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 5
 DEFAULT_LOG_FILE = "sma2ldif.log"
 VALID_DOMAIN_REGEX = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.[a-z]{2,63}){1,2}$", re.IGNORECASE)
@@ -30,6 +32,7 @@ def log_level_type(level: str) -> str:
             f"Invalid log level: {level}. Must be one of {valid_levels}"
         )
     return level
+
 
 def is_valid_domain_syntax(domain_name: str) -> str:
     """Validate domain name syntax using regex."""
@@ -52,8 +55,30 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
     return resolved_path
 
 
+# Custom formatter for UTC ISO 8601 timestamps
+class UTCISOFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return utc_time.isoformat(timespec='milliseconds')
+
+
+# Custom formatter for local time ISO 8601 timestamps with offset
+class LocalISOFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        # Convert the log record's timestamp to a datetime object
+        dt = datetime.fromtimestamp(record.created)
+        # Get the local timezone offset from time.localtime()
+        local_time = localtime(record.created)
+        offset_secs = local_time.tm_gmtoff
+        offset = timedelta(seconds=offset_secs)
+        tz = timezone(offset)
+        # Make the datetime timezone-aware
+        dt = dt.replace(tzinfo=tz)
+        return dt.isoformat(timespec='milliseconds')
+
+
 def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> None:
-    """Set up logging with a rotating file handler, without console output.
+    """Set up logging with a rotating file handler, without console output, using local time with offset.
 
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
@@ -62,8 +87,7 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
         backup_count: Number of backup log files to keep.
 
     Raises:
-        ValueError: If log_level is invalid.
-        argparse.ArgumentTypeError: If log_file path is invalid.
+        ValueError: If log_level is invalid or log_file path is invalid.
     """
     # Validate log file path
     log_file_path = validate_file_path(log_file, check_writable=True)
@@ -73,23 +97,27 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
 
-    # Clear any existing handlers to prevent console output
+    # Clear any existing handlers to prevent duplicate logging
     logging.getLogger('').handlers.clear()
 
     # Set up the root logger
     logging.getLogger('').setLevel(numeric_level)
 
     # Create rotating file handler
-    file_handler = RotatingFileHandler(
-        log_file_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
+    try:
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        )
+    except OSError as e:
+        raise ValueError(f"Failed to create log file handler for {log_file_path}: {str(e)}")
+
     file_handler.setLevel(numeric_level)
 
-    # Define log format
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # Define log format with local time ISO 8601 timestamps including offset
+    formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
     file_handler.setFormatter(formatter)
 
     # Add only the file handler to the root logger
@@ -427,7 +455,7 @@ def main() -> None:
         sys.exit(1)
 
     for alias, targets in sorted(aliases.items()):
-        logging.info(f"  {alias}: {targets}")
+        logging.info(f"{alias}: {targets}")
 
     ldif_content = generate_pps_ldif(aliases, args.domains)
     if ldif_content:
