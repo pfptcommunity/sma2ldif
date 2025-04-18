@@ -1,8 +1,8 @@
 import argparse
 import hashlib
+import logging
 import os
 import re
-import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -11,7 +11,7 @@ from typing import Dict, List, Set, Optional
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
 
 # Constants
-DEFAULT_LOG_LEVEL = "WARNING"
+DEFAULT_LOG_LEVEL = "warning"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 DEFAULT_BACKUP_COUNT = 5
 DEFAULT_LOG_FILE = "sma2ldif.log"
@@ -20,11 +20,23 @@ ALIAS_LINE_REGEX = re.compile(r'^([^:]+):\s*(.*)$')
 EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)
 LOCAL_USER_REGEX = re.compile(r'^[\w\-]+$', re.IGNORECASE)
 
+
+def log_level_type(level: str) -> str:
+    """Custom type to make log level case-insensitive."""
+    level = level.lower()  # Normalize to uppercase
+    valid_levels = ['debug', 'info', 'warning', 'error', 'critical']
+    if level not in valid_levels:
+        raise argparse.ArgumentTypeError(
+            f"Invalid log level: {level}. Must be one of {valid_levels}"
+        )
+    return level
+
 def is_valid_domain_syntax(domain_name: str) -> str:
     """Validate domain name syntax using regex."""
     if not VALID_DOMAIN_REGEX.match(domain_name):
         raise argparse.ArgumentTypeError(f"Invalid domain name syntax: {domain_name}")
     return domain_name
+
 
 def validate_file_path(path: str, check_readable: bool = False, check_writable: bool = False) -> Path:
     """Validate and resolve file path."""
@@ -39,13 +51,13 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
             raise argparse.ArgumentTypeError(f"Parent directory is not writable: {parent_dir}")
     return resolved_path
 
+
 def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> None:
-    """Set up logging with a rotating file handler and optional console output.
+    """Set up logging with a rotating file handler, without console output.
 
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
         log_file: Path to the log file.
-        quiet: If True, suppress console output.
         max_bytes: Maximum size of each log file before rotation (in bytes).
         backup_count: Number of backup log files to keep.
 
@@ -61,6 +73,12 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
 
+    # Clear any existing handlers to prevent console output
+    logging.getLogger('').handlers.clear()
+
+    # Set up the root logger
+    logging.getLogger('').setLevel(numeric_level)
+
     # Create rotating file handler
     file_handler = RotatingFileHandler(
         log_file_path,
@@ -68,6 +86,15 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
         backupCount=backup_count,
         encoding='utf-8'
     )
+    file_handler.setLevel(numeric_level)
+
+    # Define log format
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+
+    # Add only the file handler to the root logger
+    logging.getLogger('').addHandler(file_handler)
+
 
 def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
     """Classify the type of target.
@@ -95,6 +122,7 @@ def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
     if LOCAL_USER_REGEX.match(target):
         return 'local_user'
     return 'invalid'
+
 
 def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
     """Parse a sendmail alias file into a dictionary.
@@ -152,7 +180,8 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
                         target_str = ' '.join(current_target)
                         targets = split_targets(target_str)
                         if current_alias in seen_aliases:
-                            logging.warning(f"Duplicate alias '{current_alias}' detected. Overwriting previous definition.")
+                            logging.warning(
+                                f"Duplicate alias '{current_alias}' detected. Overwriting previous definition.")
                         aliases[current_alias] = targets
                         seen_aliases.add(current_alias)
                         current_target = []
@@ -187,8 +216,9 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
 
     return aliases
 
+
 def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: str,
-                   visited: Optional[Set[str]] = None, max_depth: int = 100) -> List[str]:
+                    visited: Optional[Set[str]] = None, max_depth: int = 100) -> List[str]:
     """Recursively resolve targets to emails or local users.
 
     Args:
@@ -251,6 +281,7 @@ def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: s
     seen = set()
     return [t for t in resolved if not (t in seen or seen.add(t))]
 
+
 def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], group: str = "Sendmail_Aliases") -> str:
     """Generate Proofpoint LDIF content from parsed and resolved aliases.
 
@@ -289,6 +320,7 @@ def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], group: 
 
     return "\n".join(ldif_entries)
 
+
 def write_ldif_file(ldif_content: str, output_file: Path) -> None:
     """Write LDIF content to a file.
 
@@ -308,6 +340,7 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
         logging.error(f"Permission denied writing to {output_file}")
     except Exception as e:
         logging.error(f"Failed to write {output_file}: {str(e)}")
+
 
 def main() -> None:
     """Main function to convert Sendmail alias files to Proofpoint LDIF format."""
@@ -334,7 +367,7 @@ def main() -> None:
         help='Path to the output LDIF file.'
     )
     parser.add_argument(
-        '--domains',
+        '-d', '--domains',
         metavar='<domain>',
         dest="domains",
         required=True,
@@ -345,7 +378,8 @@ def main() -> None:
     parser.add_argument(
         '--log-level',
         default=DEFAULT_LOG_LEVEL,
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        type=log_level_type,
+        choices=['debug', 'info', 'warning', 'error', 'critical'],
         help=f'Set the logging level (default: {DEFAULT_LOG_LEVEL}).'
     )
     parser.add_argument(
@@ -355,13 +389,13 @@ def main() -> None:
         help=f'Set the log file location (default: {DEFAULT_LOG_FILE}).'
     )
     parser.add_argument(
-        '-s' ,'--log-max-size',
+        '-s', '--log-max-size',
         type=int,
         default=DEFAULT_MAX_BYTES,
         help=f'Maximum size of log file in bytes before rotation (default: {DEFAULT_MAX_BYTES}).'
     )
     parser.add_argument(
-        '-c','--log-backup-count',
+        '-c', '--log-backup-count',
         type=int,
         default=DEFAULT_BACKUP_COUNT,
         help=f'Number of backup log files to keep (default: {DEFAULT_BACKUP_COUNT}).'
@@ -379,6 +413,13 @@ def main() -> None:
         args.log_max_size,
         args.log_backup_count
     )
+
+    logging.info(f"Logging Level: {args.log_level}")
+    logging.info(f"Max Log Size: {args.log_max_size}")
+    logging.info(f"Log Backup Count: {args.log_backup_count}")
+    logging.info(f"Input File: {args.input_file}")
+    logging.info(f"Output File: {args.output_file}")
+    logging.info(f"Alias Domains: {args.domains}")
 
     aliases = parse_aliases(args.input_file)
     if not aliases:
@@ -398,6 +439,7 @@ def main() -> None:
     else:
         logging.warning("No LDIF content generated.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
