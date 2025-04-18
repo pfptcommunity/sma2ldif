@@ -1,4 +1,5 @@
 # Sendmail Alias File to Proofpoint LDIF Converter
+[![PyPI Downloads](https://static.pepy.tech/badge/sma2ldif)](https://pepy.tech/projects/sma2ldif)  
 Tool to Convert Sendmail Alias Files to Proofpoint LDIF Format
 
 ### Requirements:
