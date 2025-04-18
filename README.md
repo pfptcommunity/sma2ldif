@@ -7,7 +7,7 @@ Tool to Convert Sendmail Alias Files to Proofpoint LDIF Format
  
 ### Installing the Package
 
-You can install the tool using the following command directly from Github.
+You can install the tool using the following command directly from GitHub.
 
 ```
 pip install git+https://github.com/pfptcommunity/sma2ldif.git
