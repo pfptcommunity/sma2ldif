@@ -1,0 +1,28 @@
+[build-system]
+requires = ['setuptools', 'setuptools-scm']
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "node-and-date"
+
+[tools.setuptools.packages.find]
+where = ["src"]
+
+[project]
+name = "sma2ldif"
+dynamic = ["version"]
+readme = "README.md"
+description = "Tool to Convert Sendmail Alias Files to Proofpoint LDIF Format"
+license = { text = "MIT" }
+requires-python = ">3.9"
+dependencies = []
+
+[project.urls]
+repository = "https://github.com/pfptcommunity/sma2ldif"
+#homepage = "https://github.com/pfptcommunity/sma2ldif"
+#documentation = "https://github.com/pfptcommunity/sma2ldif"
+#changelog = "https://github.com/pfptcommunity/sma2ldif"
+
+[project.scripts]
+senderstats = "main"
