@@ -1,4 +1,4 @@
-# Simple tool to compare LDIF files
+# Simple tool to convert Sendmail Alias file to Proofpoint LDIF Format
 Tool to Convert Sendmail Alias Files to Proofpoint LDIF Format
 
 ### Requirements:
