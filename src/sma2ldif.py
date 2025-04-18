@@ -383,7 +383,6 @@ def main() -> None:
         add_help=False
     )
 
-
     # Required arguments group
     required_group = parser.add_argument_group('Required Arguments')
     required_group.add_argument(
