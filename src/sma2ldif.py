@@ -379,10 +379,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sma2ldif",
         description="Convert Sendmail alias files to Proofpoint LDIF format.",
-        formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80)
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80),
+        add_help=False
     )
 
-    parser.add_argument(
+
+    # Required arguments group
+    required_group = parser.add_argument_group('Required Arguments')
+    required_group.add_argument(
         '-i', '--input',
         metavar='<aliases>',
         dest="input_file",
@@ -390,7 +394,7 @@ def main() -> None:
         required=True,
         help='Path to the input Sendmail aliases file.'
     )
-    parser.add_argument(
+    required_group.add_argument(
         '-o', '--output',
         metavar='<ldif>',
         dest="output_file",
@@ -398,7 +402,7 @@ def main() -> None:
         required=True,
         help='Path to the output LDIF file.'
     )
-    parser.add_argument(
+    required_group.add_argument(
         '-d', '--domains',
         metavar='<domain>',
         dest="domains",
@@ -407,39 +411,46 @@ def main() -> None:
         type=is_valid_domain_syntax,
         help='List of domains for alias processing (first domain is primary).'
     )
-    parser.add_argument(
+
+    # Optional arguments group
+    optional_group = parser.add_argument_group('Optional Arguments')
+    optional_group.add_argument(
         '-g', '--groups',
         metavar='<group>',
         dest="groups",
-        required=False,
         default=[],
         nargs='+',
-        help='List of memberOf groups for alias processing.'
+        help='List of memberOf groups for LDIF entries (default: none).'
     )
-    parser.add_argument(
+    optional_group.add_argument(
         '--log-level',
         default=DEFAULT_LOG_LEVEL,
         type=log_level_type,
         choices=['debug', 'info', 'warning', 'error', 'critical'],
         help=f'Set the logging level (default: {DEFAULT_LOG_LEVEL}).'
     )
-    parser.add_argument(
+    optional_group.add_argument(
         '-l', '--log-file',
         default=DEFAULT_LOG_FILE,
         type=lambda x: validate_file_path(x, check_writable=True),
         help=f'Set the log file location (default: {DEFAULT_LOG_FILE}).'
     )
-    parser.add_argument(
+    optional_group.add_argument(
         '-s', '--log-max-size',
         type=int,
         default=DEFAULT_MAX_BYTES,
         help=f'Maximum size of log file in bytes before rotation (default: {DEFAULT_MAX_BYTES}).'
     )
-    parser.add_argument(
+    optional_group.add_argument(
         '-c', '--log-backup-count',
         type=int,
         default=DEFAULT_BACKUP_COUNT,
         help=f'Number of backup log files to keep (default: {DEFAULT_BACKUP_COUNT}).'
+    )
+    optional_group.add_argument(
+        '-h', '--help',
+        action='help',
+        help='Show this help message and exit.'
     )
 
     if len(sys.argv) == 1:
