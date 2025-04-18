@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import hashlib
 import logging
 import os
 import re
@@ -24,6 +23,7 @@ ALIAS_LINE_REGEX = re.compile(r'^([^:]+):\s*(.*)$')
 EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)
 LOCAL_USER_REGEX = re.compile(r'^[\w\-]+$', re.IGNORECASE)
 SMA2LDIF_NAMESPACE = uuid.UUID("c11859e0-d9ce-4f59-826c-a5dc23d1bf1e")
+
 
 def log_level_type(level: str) -> str:
     """Custom type to make log level case-insensitive."""
