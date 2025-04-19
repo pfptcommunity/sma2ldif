@@ -11,6 +11,8 @@ from pathlib import Path
 from time import localtime
 from typing import Dict, List, Set, Optional
 
+import paramiko
+
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
 
 # Constants
@@ -26,8 +28,18 @@ SMA2LDIF_NAMESPACE = uuid.UUID("c11859e0-d9ce-4f59-826c-a5dc23d1bf1e")
 
 
 def log_level_type(level: str) -> str:
-    """Custom type to make log level case-insensitive."""
-    level = level.lower()  # Normalize to uppercase
+    """Custom type to make log level case-insensitive.
+
+    Args:
+        level (str): The log level to validate.
+
+    Returns:
+        str: The normalized log level.
+
+    Raises:
+        argparse.ArgumentTypeError: If the log level is invalid.
+    """
+    level = level.lower()
     valid_levels = ['debug', 'info', 'warning', 'error', 'critical']
     if level not in valid_levels:
         raise argparse.ArgumentTypeError(
@@ -37,14 +49,36 @@ def log_level_type(level: str) -> str:
 
 
 def is_valid_domain_syntax(domain_name: str) -> str:
-    """Validate domain name syntax using regex."""
+    """Validate domain name syntax using regex.
+
+    Args:
+        domain_name (str): The domain name to validate.
+
+    Returns:
+        str: The validated domain name.
+
+    Raises:
+        argparse.ArgumentTypeError: If the domain name syntax is invalid.
+    """
     if not VALID_DOMAIN_REGEX.match(domain_name):
         raise argparse.ArgumentTypeError(f"Invalid domain name syntax: {domain_name}")
     return domain_name
 
 
 def validate_file_path(path: str, check_readable: bool = False, check_writable: bool = False) -> Path:
-    """Validate and resolve file path."""
+    """Validate and resolve file path.
+
+    Args:
+        path (str): The file path to validate.
+        check_readable (bool): If True, check if the file exists and is readable.
+        check_writable (bool): If True, check if the parent directory is writable.
+
+    Returns:
+        Path: The resolved file path.
+
+    Raises:
+        argparse.ArgumentTypeError: If the path is invalid or permissions are insufficient.
+    """
     resolved_path = Path(path).resolve()
     if check_readable and not resolved_path.is_file():
         raise argparse.ArgumentTypeError(f"File not found or not readable: {path}")
@@ -57,24 +91,23 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
     return resolved_path
 
 
-# Custom formatter for UTC ISO 8601 timestamps
 class UTCISOFormatter(logging.Formatter):
+    """Custom formatter for UTC ISO 8601 timestamps."""
+
     def formatTime(self, record, datefmt=None):
         utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
         return utc_time.isoformat(timespec='milliseconds')
 
 
-# Custom formatter for local time ISO 8601 timestamps with offset
 class LocalISOFormatter(logging.Formatter):
+    """Custom formatter for local time ISO 8601 timestamps with offset."""
+
     def formatTime(self, record, datefmt=None):
-        # Convert the log record's timestamp to a datetime object
         dt = datetime.fromtimestamp(record.created)
-        # Get the local timezone offset from time.localtime()
         local_time = localtime(record.created)
         offset_secs = local_time.tm_gmtoff
         offset = timedelta(seconds=offset_secs)
         tz = timezone(offset)
-        # Make the datetime timezone-aware
         dt = dt.replace(tzinfo=tz)
         return dt.isoformat(timespec='milliseconds')
 
@@ -83,29 +116,22 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     """Set up logging with a rotating file handler, without console output, using local time with offset.
 
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-        log_file: Path to the log file.
-        max_bytes: Maximum size of each log file before rotation (in bytes).
-        backup_count: Number of backup log files to keep.
+        log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        log_file (str): Path to the log file.
+        max_bytes (int): Maximum size of each log file before rotation (in bytes).
+        backup_count (int): Number of backup log files to keep.
 
     Raises:
         ValueError: If log_level is invalid or log_file path is invalid.
     """
-    # Validate log file path
     log_file_path = validate_file_path(log_file, check_writable=True)
-
-    # Convert string log level to logging level constant
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
 
-    # Clear any existing handlers to prevent duplicate logging
     logging.getLogger('').handlers.clear()
-
-    # Set up the root logger
     logging.getLogger('').setLevel(numeric_level)
 
-    # Create rotating file handler
     try:
         file_handler = RotatingFileHandler(
             log_file_path,
@@ -117,24 +143,83 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
         raise ValueError(f"Failed to create log file handler for {log_file_path}: {str(e)}")
 
     file_handler.setLevel(numeric_level)
-
-    # Define log format with local time ISO 8601 timestamps including offset
     formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
     file_handler.setFormatter(formatter)
-
-    # Add only the file handler to the root logger
     logging.getLogger('').addHandler(file_handler)
+
+
+def secure_scp_transfer(
+        local_file: str,
+        remote_host: str,
+        remote_user: str,
+        remote_dir: str,
+        ssh_key: str,
+        ssh_port: int
+) -> bool:
+    """Perform a secure SCP transfer of a file to a remote host using Paramiko.
+
+    Args:
+        local_file (str): Path to the local file to transfer.
+        remote_host (str): Remote host address (e.g., IP or domain).
+        remote_user (str): Username on the remote host.
+        remote_dir (str): Destination directory on the remote host.
+        ssh_key (str): Path to the SSH private key file.
+        ssh_port (int): SSH port number for the connection.
+
+    Returns:
+        bool: True if the transfer succeeds, False otherwise.
+
+    Raises:
+        paramiko.AuthenticationException: If authentication fails.
+        paramiko.SSHException: If an SSH-related error occurs.
+        Exception: For other unexpected errors during transfer.
+    """
+    try:
+        if not os.path.isfile(local_file):
+            logging.error(f"Local file {local_file} does not exist")
+            return False
+
+        ssh: paramiko.SSHClient = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=ssh_key)
+        ssh.connect(
+            hostname=remote_host,
+            username=remote_user,
+            port=ssh_port,
+            pkey=private_key,
+            look_for_keys=False,
+            allow_agent=False
+        )
+
+        with ssh.open_sftp() as sftp:
+            remote_path: str = os.path.join(remote_dir, os.path.basename(local_file))
+            sftp.put(local_file, remote_path)
+            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path}")
+
+        ssh.close()
+        return True
+
+    except paramiko.AuthenticationException:
+        logging.error("Authentication failed. Check SSH key and remote user.")
+        return False
+    except paramiko.SSHException as e:
+        logging.error(f"SSH error: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"Error during transfer: {str(e)}")
+        return False
 
 
 def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
     """Classify the type of target.
 
     Args:
-        target: The target string to classify.
-        aliases: Dictionary of known aliases.
+        target (str): The target string to classify.
+        aliases (Dict[str, List[str]]): Dictionary of known aliases.
 
     Returns:
-        String indicating target type (command, file, include, email, alias, local_user, invalid).
+        str: Target type (command, file, include, email, alias, local_user, invalid).
     """
     target = target.strip()
     if target.startswith('"|') and target.endswith('"'):
@@ -158,10 +243,10 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
     """Parse a sendmail alias file into a dictionary.
 
     Args:
-        file_path: Path to the alias file.
+        file_path (Path): Path to the alias file.
 
     Returns:
-        Dictionary mapping aliases to their target lists.
+        Dict[str, List[str]]: Dictionary mapping aliases to their target lists.
     """
     aliases: Dict[str, List[str]] = {}
     current_alias: Optional[str] = None
@@ -252,14 +337,14 @@ def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: s
     """Recursively resolve targets to emails or local users.
 
     Args:
-        targets: List of targets to resolve.
-        aliases: Dictionary of aliases.
-        domain: Domain to append to local users.
-        visited: Set of visited aliases to detect circular references.
-        max_depth: Maximum recursion depth to prevent stack overflow.
+        targets (List[str]): List of targets to resolve.
+        aliases (Dict[str, List[str]]): Dictionary of aliases.
+        domain (str): Domain to append to local users.
+        visited (Optional[Set[str]]): Set of visited aliases to detect circular references.
+        max_depth (int): Maximum recursion depth to prevent stack overflow.
 
     Returns:
-        List of resolved email addresses.
+        List[str]: List of resolved email addresses.
     """
     if visited is None:
         visited = set()
@@ -307,48 +392,68 @@ def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: s
         else:
             logging.warning(f"Skipping non-email target '{target}' ({target_type})")
 
-    # Remove duplicates while preserving order
     seen = set()
     return [t for t in resolved if not (t in seen or seen.add(t))]
 
 
-def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups: List[str]) -> str:
-    """Generate Proofpoint LDIF content from parsed and resolved aliases.
+def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains: Optional[List[str]] = None) -> str:
+    """Create a single LDIF entry for an alias and domain.
 
     Args:
-        aliases: Dictionary of aliases.
-        domains: List of domains.
-        group: Group name for LDIF entries.
+        alias (str): The alias for the email address.
+        domain (str): The domain for the email address.
+        groups (List[str]): List of group names for the 'memberOf' attribute.
+        proxy_domains (Optional[List[str]]): Optional list of domains for 'proxyAddresses' attribute.
 
     Returns:
-        LDIF content as a string.
+        str: A string representing the LDIF entry.
     """
-    ldif_entries = []
-    domain = domains.pop(0)
+    alias_email = f"{alias}@{domain}"
+    uid = uuid.uuid5(SMA2LDIF_NAMESPACE, alias_email)
 
-    for alias in sorted(aliases.keys()):
-        alias_email = f"{alias}@{domain}"
-        uid = uuid.uuid5(SMA2LDIF_NAMESPACE, alias)
+    entry = [
+        f"dn: {alias_email}",
+        f"uid: {uid}",
+        "description: Auto generated by sma2ldif",
+        f"givenName: {alias}",
+        "sn: sma2ldif",
+        "profileType: 1",
+        f"mail: {alias_email}",
+    ]
 
-        entry = [
-            f"dn: {alias_email}",
-            f"uid: {uid}",
-            "description: Auto generated by sma2ldif",
-            f"givenName: {alias}",
-            "sn: sma2ldif",
-            "profileType: 1",
-            f"mail: {alias_email}",
-        ]
-
-        for pa in domains:
+    if proxy_domains:
+        for pa in proxy_domains:
             entry.append(f"proxyAddresses: {alias}@{pa}")
 
-        for group in groups:
-            entry.append(f"memberOf: {group}")
+    for group in groups:
+        entry.append(f"memberOf: {group}")
 
-        entry.append("")
+    entry.append("")
+    return "\n".join(entry)
 
-        ldif_entries.append("\n".join(entry))
+
+def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups: List[str], expand_proxy: bool) -> str:
+    """Generate LDIF content for Proofpoint from aliases, domains, and groups.
+
+    Args:
+        aliases (Dict[str, List[str]]): Dictionary mapping aliases to their attributes.
+        domains (List[str]): List of domains to use in LDIF entries.
+        groups (List[str]): List of group names for the 'memberOf' attribute.
+        expand_proxy (bool): If True, create separate entries for each domain; if False, use proxyAddresses.
+
+    Returns:
+        str: A string containing the complete LDIF content.
+    """
+    ldif_entries = []
+
+    if expand_proxy:
+        for alias in sorted(aliases.keys()):
+            for domain in domains:
+                ldif_entries.append(create_ldif_entry(alias, domain, groups))
+    else:
+        domain = domains.pop(0)
+        for alias in sorted(aliases.keys()):
+            ldif_entries.append(create_ldif_entry(alias, domain, groups, domains))
 
     return "\n".join(ldif_entries)
 
@@ -357,12 +462,12 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
     """Write LDIF content to a file.
 
     Args:
-        ldif_content: LDIF content to write.
-        output_file: Path to the output file.
-        force: If True, overwrite existing file.
+        ldif_content (str): LDIF content to write.
+        output_file (Path): Path to the output file.
 
     Raises:
-        RuntimeError: If output file exists and force is False.
+        PermissionError: If writing to the output file is not permitted.
+        Exception: For other unexpected errors during file writing.
     """
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -375,7 +480,20 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
 
 
 def main() -> None:
-    """Main function to convert Sendmail alias files to Proofpoint LDIF format."""
+    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SCP.
+
+    This function parses command-line arguments, sets up logging, processes the alias file,
+    generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host.
+
+    Args:
+        None
+
+    Returns:
+        None: Exits with status code 1 if processing or transfer fails.
+
+    Raises:
+        SystemExit: If required arguments are missing or processing fails.
+    """
     parser = argparse.ArgumentParser(
         prog="sma2ldif",
         description="Convert Sendmail alias files to Proofpoint LDIF format.",
@@ -422,6 +540,12 @@ def main() -> None:
         help='List of memberOf groups for LDIF entries (default: none).'
     )
     optional_group.add_argument(
+        '-e', '--expand-proxy',
+        dest="expand_proxy",
+        action='store_true',
+        help='Expand proxyAddresses into their own unique DN entries'
+    )
+    optional_group.add_argument(
         '--log-level',
         default=DEFAULT_LOG_LEVEL,
         type=log_level_type,
@@ -447,6 +571,33 @@ def main() -> None:
         help=f'Number of backup log files to keep (default: {DEFAULT_BACKUP_COUNT}).'
     )
     optional_group.add_argument(
+        '--scp',
+        action='store_true',
+        help='Enable SCP transfer of the LDIF file to a remote host.'
+    )
+    optional_group.add_argument(
+        '--remote-host',
+        help='Remote host address for SCP (required if --scp is used).'
+    )
+    optional_group.add_argument(
+        '--remote-user',
+        help='Remote username for SCP (required if --scp is used).'
+    )
+    optional_group.add_argument(
+        '--remote-dir',
+        help='Remote destination directory for SCP (required if --scp is used).'
+    )
+    optional_group.add_argument(
+        '--ssh-key',
+        help='Path to the SSH private key for SCP (required if --scp is used).'
+    )
+    optional_group.add_argument(
+        '--ssh-port',
+        type=int,
+        default=22,
+        help='SSH port for SCP (default: 22).'
+    )
+    optional_group.add_argument(
         '-h', '--help',
         action='help',
         help='Show this help message and exit.'
@@ -457,6 +608,14 @@ def main() -> None:
         sys.exit(1)
 
     args = parser.parse_args()
+
+    # Validate SCP arguments if --scp is used
+    if args.scp:
+        required_scp_args = ['remote_host', 'remote_user', 'remote_dir', 'ssh_key']
+        missing_args = [arg for arg in required_scp_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(
+                f"The following arguments are required when --scp is used: {', '.join('--' + arg.replace('_', '-') for arg in missing_args)}")
 
     setup_logging(
         args.log_level,
@@ -472,6 +631,14 @@ def main() -> None:
     logging.info(f"Output File: {args.output_file}")
     logging.info(f"Alias Domains: {args.domains}")
     logging.info(f"MemberOf Groups: {args.groups}")
+    logging.info(f"Expand Proxy: {args.expand_proxy}")
+    if args.scp:
+        logging.info(f"SCP Enabled: True")
+        logging.info(f"Remote Host: {args.remote_host}")
+        logging.info(f"Remote User: {args.remote_user}")
+        logging.info(f"Remote Dir: {args.remote_dir}")
+        logging.info(f"SSH Key: {args.ssh_key}")
+        logging.info(f"SSH Port: {args.ssh_port}")
 
     aliases = parse_aliases(args.input_file)
     if not aliases:
@@ -481,10 +648,22 @@ def main() -> None:
     for alias, targets in sorted(aliases.items()):
         logging.info(f"{alias}: {targets}")
 
-    ldif_content = generate_pps_ldif(aliases, args.domains, args.groups)
+    ldif_content = generate_pps_ldif(aliases, args.domains, args.groups, args.expand_proxy)
     if ldif_content:
         try:
             write_ldif_file(ldif_content, args.output_file)
+            if args.scp:
+                success = secure_scp_transfer(
+                    local_file=str(args.output_file),
+                    remote_host=args.remote_host,
+                    remote_user=args.remote_user,
+                    remote_dir=args.remote_dir,
+                    ssh_key=args.ssh_key,
+                    ssh_port=args.ssh_port
+                )
+                if not success:
+                    logging.error("SCP transfer failed")
+                    sys.exit(1)
         except RuntimeError as e:
             logging.error(str(e))
             sys.exit(1)
