@@ -93,7 +93,6 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
 
 class UTCISOFormatter(logging.Formatter):
     """Custom formatter for UTC ISO 8601 timestamps."""
-
     def formatTime(self, record, datefmt=None):
         utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
         return utc_time.isoformat(timespec='milliseconds')
@@ -101,7 +100,6 @@ class UTCISOFormatter(logging.Formatter):
 
 class LocalISOFormatter(logging.Formatter):
     """Custom formatter for local time ISO 8601 timestamps with offset."""
-
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created)
         local_time = localtime(record.created)
@@ -148,15 +146,20 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     logging.getLogger('').addHandler(file_handler)
 
 
-def secure_scp_transfer(
-        local_file: str,
-        remote_host: str,
-        remote_user: str,
-        remote_dir: str,
-        ssh_key: str,
-        ssh_port: int
+def secure_transfer(
+    local_file: str,
+    remote_host: str,
+    remote_user: str,
+    remote_dir: str,
+    ssh_key: str,
+    ssh_port: int,
+    protocol: str = 'sftp'
 ) -> bool:
-    """Perform a secure SCP transfer of a file to a remote host using Paramiko.
+    """Perform a secure file transfer to a remote host using Paramiko's SFTP client.
+
+    This function supports both SFTP and SCP-like transfers using Paramiko's SFTPClient.
+    The 'scp' protocol is implemented as an SFTP transfer for compatibility, ensuring
+    functionality even if SCP is disabled on the remote host.
 
     Args:
         local_file (str): Path to the local file to transfer.
@@ -165,6 +168,7 @@ def secure_scp_transfer(
         remote_dir (str): Destination directory on the remote host.
         ssh_key (str): Path to the SSH private key file.
         ssh_port (int): SSH port number for the connection.
+        protocol (str): Transfer protocol ('sftp' or 'scp', default: 'sftp').
 
     Returns:
         bool: True if the transfer succeeds, False otherwise.
@@ -195,7 +199,7 @@ def secure_scp_transfer(
         with ssh.open_sftp() as sftp:
             remote_path: str = os.path.join(remote_dir, os.path.basename(local_file))
             sftp.put(local_file, remote_path)
-            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path}")
+            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via {protocol.upper()}")
 
         ssh.close()
         return True
@@ -204,10 +208,10 @@ def secure_scp_transfer(
         logging.error("Authentication failed. Check SSH key and remote user.")
         return False
     except paramiko.SSHException as e:
-        logging.error(f"SSH error: {str(e)}")
+        logging.error(f"{protocol.upper()} error: {str(e)}")
         return False
     except Exception as e:
-        logging.error(f"Error during transfer: {str(e)}")
+        logging.error(f"Error during {protocol.upper()} transfer: {str(e)}")
         return False
 
 
@@ -480,10 +484,11 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
 
 
 def main() -> None:
-    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SCP.
+    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SFTP or SCP.
 
     This function parses command-line arguments, sets up logging, processes the alias file,
-    generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host.
+    generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host
+    using Paramiko's SFTP client. The 'scp' protocol is implemented as an SFTP transfer for compatibility.
 
     Args:
         None
@@ -571,31 +576,37 @@ def main() -> None:
         help=f'Number of backup log files to keep (default: {DEFAULT_BACKUP_COUNT}).'
     )
     optional_group.add_argument(
-        '--scp',
+        '--transfer',
         action='store_true',
-        help='Enable SCP transfer of the LDIF file to a remote host.'
+        help='Enable transfer of the LDIF file to a remote host via SFTP or SCP.'
+    )
+    optional_group.add_argument(
+        '--protocol',
+        choices=['sftp', 'scp'],
+        default='scp',
+        help='Transfer protocol (sftp or scp, default: scp). Both use Paramiko SFTP.'
     )
     optional_group.add_argument(
         '--remote-host',
-        help='Remote host address for SCP (required if --scp is used).'
+        help='Remote host address for transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--remote-user',
-        help='Remote username for SCP (required if --scp is used).'
+        help='Remote username for transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--remote-dir',
-        help='Remote destination directory for SCP (required if --scp is used).'
+        help='Remote destination directory for transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--ssh-key',
-        help='Path to the SSH private key for SCP (required if --scp is used).'
+        help='Path to the SSH private key for transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--ssh-port',
         type=int,
         default=22,
-        help='SSH port for SCP (default: 22).'
+        help='SSH port for transfer (default: 22).'
     )
     optional_group.add_argument(
         '-h', '--help',
@@ -609,13 +620,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Validate SCP arguments if --scp is used
-    if args.scp:
-        required_scp_args = ['remote_host', 'remote_user', 'remote_dir', 'ssh_key']
-        missing_args = [arg for arg in required_scp_args if getattr(args, arg) is None]
+    # Validate transfer arguments if --transfer is used
+    if args.transfer:
+        required_transfer_args = ['remote_host', 'remote_user', 'remote_dir', 'ssh_key']
+        missing_args = [arg for arg in required_transfer_args if getattr(args, arg) is None]
         if missing_args:
-            parser.error(
-                f"The following arguments are required when --scp is used: {', '.join('--' + arg.replace('_', '-') for arg in missing_args)}")
+            parser.error(f"The following arguments are required when --transfer is used: {', '.join('--' + arg.replace('_', '-') for arg in missing_args)}")
 
     setup_logging(
         args.log_level,
@@ -632,8 +642,9 @@ def main() -> None:
     logging.info(f"Alias Domains: {args.domains}")
     logging.info(f"MemberOf Groups: {args.groups}")
     logging.info(f"Expand Proxy: {args.expand_proxy}")
-    if args.scp:
-        logging.info(f"SCP Enabled: True")
+    if args.transfer:
+        logging.info(f"Transfer Enabled: True")
+        logging.info(f"Protocol: {args.protocol.upper()}")
         logging.info(f"Remote Host: {args.remote_host}")
         logging.info(f"Remote User: {args.remote_user}")
         logging.info(f"Remote Dir: {args.remote_dir}")
@@ -652,17 +663,18 @@ def main() -> None:
     if ldif_content:
         try:
             write_ldif_file(ldif_content, args.output_file)
-            if args.scp:
-                success = secure_scp_transfer(
+            if args.transfer:
+                success = secure_transfer(
                     local_file=str(args.output_file),
                     remote_host=args.remote_host,
                     remote_user=args.remote_user,
                     remote_dir=args.remote_dir,
                     ssh_key=args.ssh_key,
-                    ssh_port=args.ssh_port
+                    ssh_port=args.ssh_port,
+                    protocol=args.protocol
                 )
                 if not success:
-                    logging.error("SCP transfer failed")
+                    logging.error(f"Transfer failed using {args.protocol.upper()}")
                     sys.exit(1)
         except RuntimeError as e:
             logging.error(str(e))
