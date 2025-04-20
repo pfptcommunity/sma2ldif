@@ -1,4 +1,4 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 import argparse
 import logging
 import os
@@ -11,6 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
 from typing import Dict, List, Set, Optional, Tuple
+from tqdm import tqdm
 import paramiko
 
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\$$ \x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+) $$)$'
@@ -26,19 +27,8 @@ EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)
 LOCAL_USER_REGEX = re.compile(r'^[\w\-]+$', re.IGNORECASE)
 SMA2LDIF_NAMESPACE = uuid.UUID("c11859e0-d9ce-4f59-826c-a5dc23d1bf1e")
 
-
 def log_level_type(level: str) -> str:
-    """Custom type to make log level case-insensitive.
-
-    Args:
-        level (str): The log level to validate.
-
-    Returns:
-        str: The normalized log level.
-
-    Raises:
-        argparse.ArgumentTypeError: If the log level is invalid.
-    """
+    """Custom type to make log level case-insensitive."""
     level = level.lower()
     valid_levels = ['debug', 'info', 'warning', 'error', 'critical']
     if level not in valid_levels:
@@ -47,38 +37,14 @@ def log_level_type(level: str) -> str:
         )
     return level
 
-
 def is_valid_domain_syntax(domain_name: str) -> str:
-    """Validate domain name syntax using regex.
-
-    Args:
-        domain_name (str): The domain name to validate.
-
-    Returns:
-        str: The validated domain name.
-
-    Raises:
-        argparse.ArgumentTypeError: If the domain name syntax is invalid.
-    """
+    """Validate domain name syntax using regex."""
     if not VALID_DOMAIN_REGEX.match(domain_name):
         raise argparse.ArgumentTypeError(f"Invalid domain name syntax: {domain_name}")
     return domain_name
 
-
 def validate_file_path(path: str, check_readable: bool = False, check_writable: bool = False) -> Path:
-    """Validate and resolve file path.
-
-    Args:
-        path (str): The file path to validate.
-        check_readable (bool): If True, check if the file exists and is readable.
-        check_writable (bool): If True, check if the parent directory is writable.
-
-    Returns:
-        Path: The resolved file path.
-
-    Raises:
-        argparse.ArgumentTypeError: If the path is invalid or permissions are insufficient.
-    """
+    """Validate and resolve file path."""
     resolved_path = Path(path).resolve()
     if check_readable and not resolved_path.is_file():
         raise argparse.ArgumentTypeError(f"File not found or not readable: {path}")
@@ -90,51 +56,32 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
             raise argparse.ArgumentTypeError(f"Parent directory is not writable: {parent_dir}")
     return resolved_path
 
-
 def parse_remote(remote: str) -> Tuple[str, str, Optional[str]]:
-    """Parse a remote specification in the format username@hostname[:directory].
-
-    Args:
-        remote (str): The remote specification to parse.
-
-    Returns:
-        Tuple[str, str, Optional[str]]: A tuple of (username, hostname, directory), where directory is None if not provided.
-
-    Raises:
-        argparse.ArgumentTypeError: If the remote specification is invalid.
-    """
+    """Parse a remote specification in the format username@hostname[:directory]."""
     if '@' not in remote:
         raise argparse.ArgumentTypeError(
             f"Invalid remote specification: {remote}. Must be username@hostname[:directory]")
-
     username, rest = remote.split('@', 1)
     if not username:
         raise argparse.ArgumentTypeError(f"Invalid remote specification: {remote}. Username cannot be empty")
-
     if ':' in rest:
         hostname, directory = rest.split(':', 1)
         if not directory:
             directory = None
     else:
         hostname, directory = rest, None
-
     if not hostname:
         raise argparse.ArgumentTypeError(f"Invalid remote specification: {remote}. Hostname cannot be empty")
-
     return username, hostname, directory
-
 
 class UTCISOFormatter(logging.Formatter):
     """Custom formatter for UTC ISO 8601 timestamps."""
-
     def formatTime(self, record, datefmt=None):
         utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
         return utc_time.isoformat(timespec='milliseconds')
 
-
 class LocalISOFormatter(logging.Formatter):
     """Custom formatter for local time ISO 8601 timestamps with offset."""
-
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created)
         local_time = localtime(record.created)
@@ -144,30 +91,14 @@ class LocalISOFormatter(logging.Formatter):
         dt = dt.replace(tzinfo=tz)
         return dt.isoformat(timespec='milliseconds')
 
-
-def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> None:
-    """Set up logging with a rotating file handler and stdout for INFO messages.
-
-    File logging includes timestamps and full details, while stdout logs only INFO messages
-    with the plain text message, without timestamps.
-
-    Args:
-        log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-        log_file (str): Path to the log file.
-        max_bytes (int): Maximum size of each log file before rotation (in bytes).
-        backup_count (int): Number of backup log files to keep.
-
-    Raises:
-        ValueError: If log_level is invalid or log_file path is invalid.
-    """
+def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int, quiet: bool = False) -> None:
+    """Set up logging with a rotating file handler and optional stdout for INFO messages."""
     log_file_path = validate_file_path(log_file, check_writable=True)
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
-
     logging.getLogger('').handlers.clear()
     logging.getLogger('').setLevel(numeric_level)
-
     try:
         file_handler = RotatingFileHandler(
             log_file_path,
@@ -177,18 +108,44 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
         )
     except OSError as e:
         raise ValueError(f"Failed to create log file handler for {log_file_path}: {str(e)}")
-
     file_handler.setLevel(numeric_level)
     file_formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
     file_handler.setFormatter(file_formatter)
     logging.getLogger('').addHandler(file_handler)
+    if not quiet:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.INFO)
+        stream_formatter = logging.Formatter('%(message)s')
+        stream_handler.setFormatter(stream_formatter)
+        logging.getLogger('').addHandler(stream_handler)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.INFO)
-    stream_formatter = logging.Formatter('%(message)s')
-    stream_handler.setFormatter(stream_formatter)
-    logging.getLogger('').addHandler(stream_handler)
+def validate_key_passphrase(identity_file: str, passphrase: Optional[str] = None) -> bool:
+    """Validate if the passphrase is correct for the SSH key."""
+    key_classes = [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]
+    for key_class in key_classes:
+        try:
+            key_class(filename=identity_file, password=passphrase)
+            return True
+        except paramiko.ssh_exception.PasswordRequiredException:
+            return False
+        except paramiko.ssh_exception.SSHException:
+            continue
+    logging.error(f"Unsupported or invalid SSH key: {identity_file}")
+    return False
 
+def check_key_needs_passphrase(identity_file: str) -> bool:
+    """Check if the SSH key requires a passphrase."""
+    key_classes = [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]
+    for key_class in key_classes:
+        try:
+            key_class(filename=identity_file)
+            return False
+        except paramiko.ssh_exception.PasswordRequiredException:
+            return True
+        except paramiko.ssh_exception.SSHException:
+            continue
+    logging.error(f"Unsupported or invalid SSH key: {identity_file}")
+    return False
 
 def secure_sftp_transfer(
         local_file: str,
@@ -197,51 +154,57 @@ def secure_sftp_transfer(
         remote_dir: Optional[str] = None,
         identity_file: Optional[str] = None,
         ssh_port: int = 22,
-        password: Optional[str] = None
+        password: Optional[str] = None,
+        key_passphrase: Optional[str] = None,
+        quiet: bool = False
 ) -> bool:
-    """Perform a secure SFTP file transfer to a remote host using Paramiko's SFTP client.
-
-    Supports key-based authentication if identity_file is provided, or password authentication if password is provided.
-    Compatible with hosts where SCP is disabled, as it uses the SFTP protocol.
-
-    Args:
-        local_file (str): Path to the local file to transfer.
-        remote_host (str): Remote host address (e.g., IP or domain).
-        remote_user (str): Username on the remote host.
-        remote_dir (Optional[str]): Destination directory on the remote host (defaults to home directory if None).
-        identity_file (Optional[str]): Path to the SSH private key file, if using key-based authentication.
-        ssh_port (int): SSH port number for the connection.
-        password (Optional[str]): Password for authentication, if no identity file is provided.
-
-    Returns:
-        bool: True if the transfer succeeds, False otherwise.
-
-    Raises:
-        paramiko.AuthenticationException: If authentication fails.
-        paramiko.SSHException: If an SFTP-related error occurs.
-        Exception: For other unexpected errors during transfer.
-    """
+    """Perform a secure SFTP file transfer to a remote host using Paramiko's SFTP client."""
     try:
         if not os.path.isfile(local_file):
             logging.error(f"Local file {local_file} does not exist")
             return False
-
-        ssh: paramiko.SSHClient = paramiko.SSHClient()
+        ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
         if identity_file:
-            private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=identity_file)
-            ssh.connect(
-                hostname=remote_host,
-                username=remote_user,
-                port=ssh_port,
-                pkey=private_key,
-                look_for_keys=False,
-                allow_agent=False
-            )
-            logging.info("Authenticated with SSH key for SFTP transfer")
+            needs_passphrase = check_key_needs_passphrase(identity_file)
+            if needs_passphrase:
+                if key_passphrase is None and not quiet:
+                    key_passphrase = getpass(f"Enter passphrase for SSH key {identity_file}: ")
+                if key_passphrase is not None or quiet:
+                    if not validate_key_passphrase(identity_file, key_passphrase):
+                        logging.error(
+                            f"Invalid passphrase for SSH key {identity_file}"
+                            if key_passphrase is not None
+                            else f"Passphrase required for SSH key {identity_file}"
+                        )
+                        return False
+            key_classes = [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]
+            private_key = None
+            for key_class in key_classes:
+                try:
+                    private_key = key_class(filename=identity_file, password=key_passphrase)
+                    break
+                except paramiko.ssh_exception.SSHException:
+                    continue
+            if private_key is None:
+                logging.error(f"Failed to load SSH key: {identity_file}. Unsupported key type or invalid key.")
+                return False
+            try:
+                ssh.connect(
+                    hostname=remote_host,
+                    username=remote_user,
+                    port=ssh_port,
+                    pkey=private_key,
+                    look_for_keys=False,
+                    allow_agent=False
+                )
+                if not quiet:
+                    logging.info(f"Authenticated with SSH key ({private_key.get_name()}) for SFTP transfer")
+            except paramiko.ssh_exception.SSHException as e:
+                logging.error(f"SSH key authentication failed: {str(e)}")
+                return False
         else:
-            if password is None:
+            if password is None and not quiet:
                 password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
             ssh.connect(
                 hostname=remote_host,
@@ -249,17 +212,21 @@ def secure_sftp_transfer(
                 port=ssh_port,
                 password=password
             )
-            logging.info("Authenticated with password for SFTP transfer")
-
+            if not quiet:
+                logging.info("Authenticated with password for SFTP transfer")
         with ssh.open_sftp() as sftp:
-            remote_path = os.path.join(remote_dir, os.path.basename(local_file)) if remote_dir else os.path.basename(
-                local_file)
-            sftp.put(local_file, remote_path)
-            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via SFTP")
-
+            remote_path = os.path.join(remote_dir, os.path.basename(local_file)) if remote_dir else os.path.basename(local_file)
+            file_size = os.path.getsize(local_file)
+            with open(local_file, 'rb') as f:
+                if quiet:
+                    sftp.putfo(f, remote_path)
+                else:
+                    with tqdm(total=file_size, unit='B', unit_scale=True, desc="Transferring") as pbar:
+                        sftp.putfo(f, remote_path, callback=lambda x, y: pbar.update(x - pbar.n))
+            if not quiet:
+                logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via SFTP")
         ssh.close()
         return True
-
     except paramiko.AuthenticationException:
         logging.error("Authentication failed. Check SSH key or password and remote user.")
         return False
@@ -270,17 +237,8 @@ def secure_sftp_transfer(
         logging.error(f"Error during SFTP transfer: {str(e)}")
         return False
 
-
 def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
-    """Classify the type of target.
-
-    Args:
-        target (str): The target string to classify.
-        aliases (Dict[str, List[str]]): Dictionary of known aliases.
-
-    Returns:
-        str: Target type (command, file, include, email, alias, local_user, invalid).
-    """
+    """Classify the type of target."""
     target = target.strip()
     if target.startswith('"|') and target.endswith('"'):
         return 'command'
@@ -298,21 +256,12 @@ def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
         return 'local_user'
     return 'invalid'
 
-
 def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
-    """Parse a sendmail alias file into a dictionary.
-
-    Args:
-        file_path (Path): Path to the alias file.
-
-    Returns:
-        Dict[str, List[str]]: Dictionary mapping aliases to their target lists.
-    """
+    """Parse a sendmail alias file into a dictionary."""
     aliases: Dict[str, List[str]] = {}
     current_alias: Optional[str] = None
     current_target: List[str] = []
     seen_aliases: Set[str] = set()
-
     def split_targets(target_str: str) -> List[str]:
         """Split targets by commas, preserving quoted strings."""
         targets = []
@@ -334,21 +283,18 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
         if current.strip():
             targets.append(current.strip())
         return targets
-
     try:
         with open(file_path, 'r', encoding="utf-8-sig") as f:
             for line in f:
                 line = line.rstrip()
                 if not line or line.startswith('#'):
                     continue
-
                 if line.startswith((' ', '\t')):
                     if current_alias:
                         current_target.append(line.lstrip())
                     else:
                         logging.warning(f"Continuation line ignored without alias: {line}")
                     continue
-
                 match = ALIAS_LINE_REGEX.match(line)
                 if match:
                     if current_alias:
@@ -367,7 +313,6 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
                         current_target.append(match.group(2))
                 else:
                     logging.warning(f"Invalid line skipped: {line}")
-
             if current_alias:
                 target_str = ' '.join(current_target)
                 targets = split_targets(target_str)
@@ -375,7 +320,6 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
                     logging.warning(f"Duplicate alias '{current_alias}' detected. Overwriting previous definition.")
                 aliases[current_alias] = targets
                 seen_aliases.add(current_alias)
-
     except FileNotFoundError:
         logging.error(f"Alias file {file_path} not found.")
         return {}
@@ -388,36 +332,19 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
     except Exception as e:
         logging.error(f"Failed to parse {file_path}: {str(e)}")
         return {}
-
     return aliases
-
 
 def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: str,
                     visited: Optional[Set[str]] = None, max_depth: int = 100) -> List[str]:
-    """Recursively resolve targets to emails or local users.
-
-    Args:
-        targets (List[str]): List of targets to resolve.
-        aliases (Dict[str, List[str]]): Dictionary of aliases.
-        domain (str): Domain to append to local users.
-        visited (Optional[Set[str]]): Set of visited aliases to detect circular references.
-        max_depth (int): Maximum recursion depth to prevent stack overflow.
-
-    Returns:
-        List[str]: List of resolved email addresses.
-    """
+    """Recursively resolve targets to emails or local users."""
     if visited is None:
         visited = set()
-
     if max_depth <= 0:
         logging.error("Maximum recursion depth exceeded in alias resolution")
         return []
-
     resolved = []
-
     for target in targets:
         target_type = classify_target(target, aliases)
-
         if target_type == 'email':
             resolved.append(target)
         elif target_type == 'local_user':
@@ -451,26 +378,13 @@ def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: s
                 logging.warning(f"Failed to read include file '{file_path}': {str(e)}")
         else:
             logging.warning(f"Skipping non-email target '{target}' ({target_type})")
-
     seen = set()
     return [t for t in resolved if not (t in seen or seen.add(t))]
 
-
 def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains: Optional[List[str]] = None) -> str:
-    """Create a single LDIF entry for an alias and domain.
-
-    Args:
-        alias (str): The alias for the email address.
-        domain (str): The domain for the email address.
-        groups (List[str]): List of group names for the 'memberOf' attribute.
-        proxy_domains (Optional[List[str]]): Optional list of domains for 'proxyAddresses' attribute.
-
-    Returns:
-        str: A string representing the LDIF entry.
-    """
+    """Create a single LDIF entry for an alias and domain."""
     alias_email = f"{alias}@{domain}"
     uid = uuid.uuid5(SMA2LDIF_NAMESPACE, alias_email)
-
     entry = [
         f"dn: {alias_email}",
         f"uid: {uid}",
@@ -480,32 +394,17 @@ def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains:
         "profileType: 1",
         f"mail: {alias_email}",
     ]
-
     if proxy_domains:
         for pa in proxy_domains:
             entry.append(f"proxyAddresses: {alias}@{pa}")
-
     for group in groups:
         entry.append(f"memberOf: {group}")
-
     entry.append("")
     return "\n".join(entry)
 
-
 def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups: List[str], expand_proxy: bool) -> str:
-    """Generate LDIF content for Proofpoint from aliases, domains, and groups.
-
-    Args:
-        aliases (Dict[str, List[str]]): Dictionary mapping aliases to their attributes.
-        domains (List[str]): List of domains to use in LDIF entries.
-        groups (List[str]): List of group names for the 'memberOf' attribute.
-        expand_proxy (bool): If True, create separate entries for each domain; if False, use proxyAddresses.
-
-    Returns:
-        str: A string containing the complete LDIF content.
-    """
+    """Generate LDIF content for Proofpoint from aliases, domains, and groups."""
     ldif_entries = []
-
     if expand_proxy:
         for alias in sorted(aliases.keys()):
             for domain in domains:
@@ -514,21 +413,10 @@ def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups:
         domain = domains.pop(0)
         for alias in sorted(aliases.keys()):
             ldif_entries.append(create_ldif_entry(alias, domain, groups, domains))
-
     return "\n".join(ldif_entries)
 
-
-def write_ldif_file(ldif_content: str, output_file: Path) -> None:
-    """Write LDIF content to a file.
-
-    Args:
-        ldif_content (str): LDIF content to write.
-        output_file (Path): Path to the output file.
-
-    Raises:
-        PermissionError: If writing to the output file is not permitted.
-        Exception: For other unexpected errors during file writing.
-    """
+def write_ldif_file(ldif_content: str, output_file: Path, quiet: bool = False) -> None:
+    """Write LDIF content to a file."""
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(ldif_content)
@@ -538,32 +426,14 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
     except Exception as e:
         logging.error(f"Failed to write {output_file}: {str(e)}")
 
-
 def main() -> None:
-    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SFTP.
-
-    This function parses command-line arguments, sets up logging, processes the alias file,
-    generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host
-    using Paramiko's SFTP client. If -i/--identity-file is provided, uses key-based authentication;
-    otherwise, prompts for a password interactively.
-
-    Args:
-        None
-
-    Returns:
-        None: Exits with status code 1 if processing or transfer fails.
-
-    Raises:
-        SystemExit: If required arguments are missing or processing fails.
-    """
+    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SFTP."""
     parser = argparse.ArgumentParser(
         prog="sma2ldif",
         description="Convert Sendmail alias files to Proofpoint LDIF format.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80),
         add_help=False
     )
-
-    # Required arguments group
     required_group = parser.add_argument_group('Required Arguments')
     required_group.add_argument(
         '--alias-file',
@@ -590,8 +460,6 @@ def main() -> None:
         type=is_valid_domain_syntax,
         help='List of domains for alias processing (first domain is primary).'
     )
-
-    # Optional arguments group
     optional_group = parser.add_argument_group('Optional Arguments')
     optional_group.add_argument(
         '-g', '--groups',
@@ -654,70 +522,95 @@ def main() -> None:
         help='SSH port for SFTP transfer (defaults to 22).'
     )
     optional_group.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Suppress all stdout output, including progress bar and INFO messages.'
+    )
+    optional_group.add_argument(
         '-h', '--help',
         action='help',
         help='Show this help message and exit.'
     )
-
     if len(sys.argv) == 1:
         parser.print_usage(sys.stderr)
         sys.exit(1)
-
     args = parser.parse_args()
-
-    # Validate transfer arguments if --transfer is used
     if args.transfer and not args.remote:
         parser.error("The --remote argument is required when --transfer is used")
-
-    # Suppress paramiko's debug logs (e.g., [chan 0] messages)
     logging.getLogger("paramiko").setLevel(logging.WARNING)
-
-    # Validate aliases file existence early to avoid unnecessary password prompt
     if not os.path.isfile(args.input_file):
         logging.error(f"Alias file {args.input_file} does not exist")
         sys.exit(1)
-
-    # Prompt for password early if transfer is enabled, remote is specified, and no identity file is provided
     password = None
-    if args.transfer and args.remote and not args.identity_file:
+    key_passphrase = None
+    if args.transfer and args.remote:
         remote_user, remote_host, _ = args.remote
-        password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
-
+        if args.identity_file:
+            needs_passphrase = check_key_needs_passphrase(args.identity_file)
+            if needs_passphrase:
+                if args.quiet:
+                    key_passphrase = os.environ.get('SMA2LDIF_KEY_PASSPHRASE')
+                    if key_passphrase is None:
+                        logging.error(
+                            "Key passphrase required in quiet mode. Set SMA2LDIF_KEY_PASSPHRASE environment variable.")
+                        sys.exit(1)
+                    if not validate_key_passphrase(args.identity_file, key_passphrase):
+                        logging.error(f"Invalid passphrase in SMA2LDIF_KEY_PASSPHRASE for {args.identity_file}")
+                        sys.exit(1)
+                else:
+                    key_passphrase = getpass(f"Enter passphrase for SSH key {args.identity_file}: ")
+                    if not validate_key_passphrase(args.identity_file, key_passphrase):
+                        logging.error(f"Invalid passphrase for {args.identity_file}")
+                        sys.exit(1)
+            else:
+                if args.quiet:
+                    password = os.environ.get('SMA2LDIF_PASSWORD')
+                    if password is None:
+                        logging.error(
+                            "Password required in quiet mode for key without passphrase. Set SMA2LDIF_PASSWORD environment variable.")
+                        sys.exit(1)
+        else:
+            if args.quiet:
+                password = os.environ.get('SMA2LDIF_PASSWORD')
+                if password is None:
+                    logging.error(
+                        "Password required in quiet mode. Set SMA2LDIF_PASSWORD environment variable.")
+                    sys.exit(1)
+            else:
+                password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
     setup_logging(
         args.log_level,
         args.log_file,
         args.log_max_size,
-        args.log_backup_count
+        args.log_backup_count,
+        quiet=args.quiet
     )
-
-    logging.info(f"Logging Level: {args.log_level}")
-    logging.info(f"Max Log Size: {args.log_max_size}")
-    logging.info(f"Log Backup Count: {args.log_backup_count}")
-    logging.info(f"Alias File: {args.input_file}")
-    logging.info(f"LDIF File: {args.output_file}")
-    logging.info(f"Alias Domains: {args.domains}")
-    logging.info(f"MemberOf Groups: {args.groups}")
-    logging.info(f"Expand Proxy: {args.expand_proxy}")
-    if args.transfer:
-        remote_user, remote_host, remote_dir = args.remote
-        logging.info(f"Transfer Enabled: True")
-        logging.info(f"Remote: {remote_user}@{remote_host}")
-        logging.info(f"Remote Dir: {remote_dir if remote_dir else 'home directory'}")
-        logging.info(f"SSH Port: {args.ssh_port}")
-        logging.info(f"Identity File: {'provided' if args.identity_file else 'not provided, will prompt for password'}")
-
+    if not args.quiet:
+        logging.info(f"Logging Level: {args.log_level}")
+        logging.info(f"Max Log Size: {args.log_max_size}")
+        logging.info(f"Log Backup Count: {args.log_backup_count}")
+        logging.info(f"Alias File: {args.input_file}")
+        logging.info(f"LDIF File: {args.output_file}")
+        logging.info(f"Alias Domains: {args.domains}")
+        logging.info(f"MemberOf Groups: {args.groups}")
+        logging.info(f"Expand Proxy: {args.expand_proxy}")
+        if args.transfer:
+            remote_user, remote_host, remote_dir = args.remote
+            logging.info(f"Transfer Enabled: True")
+            logging.info(f"Remote: {remote_user}@{remote_host}")
+            logging.info(f"Remote Dir: {remote_dir if remote_dir else 'home directory'}")
+            logging.info(f"SSH Port: {args.ssh_port}")
+            logging.info(f"Identity File: {'provided' if args.identity_file else 'not provided, will prompt for password'}")
     aliases = parse_aliases(args.input_file)
     if not aliases:
         logging.error("No aliases to process.")
         sys.exit(1)
-
     for alias, targets in sorted(aliases.items()):
         logging.debug(f"{alias}: {targets}")
-
     ldif_content = generate_pps_ldif(aliases, args.domains, args.groups, args.expand_proxy)
     if ldif_content:
         try:
-            write_ldif_file(ldif_content, args.output_file)
+            write_ldif_file(ldif_content, args.output_file, quiet=args.quiet)
             if args.transfer:
                 remote_user, remote_host, remote_dir = args.remote
                 success = secure_sftp_transfer(
@@ -727,7 +620,9 @@ def main() -> None:
                     remote_dir=remote_dir,
                     identity_file=args.identity_file,
                     ssh_port=args.ssh_port,
-                    password=password
+                    password=password,
+                    key_passphrase=key_passphrase,
+                    quiet=args.quiet
                 )
                 if not success:
                     logging.error("SFTP transfer failed")
@@ -738,7 +633,6 @@ def main() -> None:
     else:
         logging.warning("No LDIF content generated.")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
