@@ -10,6 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
 from typing import Dict, List, Set, Optional
+from getpass import getpass
 
 import paramiko
 
@@ -111,7 +112,10 @@ class LocalISOFormatter(logging.Formatter):
 
 
 def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> None:
-    """Set up logging with a rotating file handler, without console output, using local time with offset.
+    """Set up logging with a rotating file handler and stdout for INFO messages.
+
+    File logging includes timestamps and full details, while stdout logs only INFO messages
+    with the plain text message, without timestamps.
 
     Args:
         log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
@@ -141,41 +145,44 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
         raise ValueError(f"Failed to create log file handler for {log_file_path}: {str(e)}")
 
     file_handler.setLevel(numeric_level)
-    formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
-    file_handler.setFormatter(formatter)
+    file_formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
+    file_handler.setFormatter(file_formatter)
     logging.getLogger('').addHandler(file_handler)
 
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_formatter = logging.Formatter('%(message)s')
+    stream_handler.setFormatter(stream_formatter)
+    logging.getLogger('').addHandler(stream_handler)
 
-def secure_transfer(
+
+def secure_sftp_transfer(
     local_file: str,
     remote_host: str,
     remote_user: str,
-    remote_dir: str,
-    ssh_key: str,
-    ssh_port: int,
-    protocol: str = 'sftp'
+    remote_dir: Optional[str] = None,
+    ssh_key: Optional[str] = None,
+    ssh_port: int = 22
 ) -> bool:
-    """Perform a secure file transfer to a remote host using Paramiko's SFTP client.
+    """Perform a secure SFTP file transfer to a remote host using Paramiko's SFTP client.
 
-    This function supports both SFTP and SCP-like transfers using Paramiko's SFTPClient.
-    The 'scp' protocol is implemented as an SFTP transfer for compatibility, ensuring
-    functionality even if SCP is disabled on the remote host.
+    Supports key-based authentication if ssh_key is provided, or prompts for a password if not.
+    Compatible with hosts where SCP is disabled, as it uses the SFTP protocol.
 
     Args:
         local_file (str): Path to the local file to transfer.
         remote_host (str): Remote host address (e.g., IP or domain).
         remote_user (str): Username on the remote host.
-        remote_dir (str): Destination directory on the remote host.
-        ssh_key (str): Path to the SSH private key file.
+        remote_dir (Optional[str]): Destination directory on the remote host (defaults to home directory if None).
+        ssh_key (Optional[str]): Path to the SSH private key file, if using key-based authentication.
         ssh_port (int): SSH port number for the connection.
-        protocol (str): Transfer protocol ('sftp' or 'scp', default: 'sftp').
 
     Returns:
         bool: True if the transfer succeeds, False otherwise.
 
     Raises:
         paramiko.AuthenticationException: If authentication fails.
-        paramiko.SSHException: If an SSH-related error occurs.
+        paramiko.SSHException: If an SFTP-related error occurs.
         Exception: For other unexpected errors during transfer.
     """
     try:
@@ -186,32 +193,43 @@ def secure_transfer(
         ssh: paramiko.SSHClient = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=ssh_key)
-        ssh.connect(
-            hostname=remote_host,
-            username=remote_user,
-            port=ssh_port,
-            pkey=private_key,
-            look_for_keys=False,
-            allow_agent=False
-        )
+        if ssh_key:
+            private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=ssh_key)
+            ssh.connect(
+                hostname=remote_host,
+                username=remote_user,
+                port=ssh_port,
+                pkey=private_key,
+                look_for_keys=False,
+                allow_agent=False
+            )
+            logging.info("Authenticated with SSH key for SFTP transfer")
+        else:
+            password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
+            ssh.connect(
+                hostname=remote_host,
+                username=remote_user,
+                port=ssh_port,
+                password=password
+            )
+            logging.info("Authenticated with password for SFTP transfer")
 
         with ssh.open_sftp() as sftp:
-            remote_path: str = os.path.join(remote_dir, os.path.basename(local_file))
+            remote_path = os.path.join(remote_dir, os.path.basename(local_file)) if remote_dir else os.path.basename(local_file)
             sftp.put(local_file, remote_path)
-            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via {protocol.upper()}")
+            logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via SFTP")
 
         ssh.close()
         return True
 
     except paramiko.AuthenticationException:
-        logging.error("Authentication failed. Check SSH key and remote user.")
+        logging.error("Authentication failed. Check SSH key or password and remote user.")
         return False
     except paramiko.SSHException as e:
-        logging.error(f"{protocol.upper()} error: {str(e)}")
+        logging.error(f"SFTP error: {str(e)}")
         return False
     except Exception as e:
-        logging.error(f"Error during {protocol.upper()} transfer: {str(e)}")
+        logging.error(f"Error during SFTP transfer: {str(e)}")
         return False
 
 
@@ -484,11 +502,12 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
 
 
 def main() -> None:
-    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SFTP or SCP.
+    """Main function to convert Sendmail alias files to Proofpoint LDIF format and optionally transfer via SFTP.
 
     This function parses command-line arguments, sets up logging, processes the alias file,
     generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host
-    using Paramiko's SFTP client. The 'scp' protocol is implemented as an SFTP transfer for compatibility.
+    using Paramiko's SFTP client. If --ssh-key is provided, uses key-based authentication; otherwise,
+    prompts for a password interactively.
 
     Args:
         None
@@ -578,35 +597,29 @@ def main() -> None:
     optional_group.add_argument(
         '--transfer',
         action='store_true',
-        help='Enable transfer of the LDIF file to a remote host via SFTP or SCP.'
-    )
-    optional_group.add_argument(
-        '--protocol',
-        choices=['sftp', 'scp'],
-        default='scp',
-        help='Transfer protocol (sftp or scp, default: scp). Both use Paramiko SFTP.'
+        help='Enable transfer of the LDIF file to a remote host via SFTP.'
     )
     optional_group.add_argument(
         '--remote-host',
-        help='Remote host address for transfer (required if --transfer is used).'
+        help='Remote host address for SFTP transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--remote-user',
-        help='Remote username for transfer (required if --transfer is used).'
+        help='Remote username for SFTP transfer (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--remote-dir',
-        help='Remote destination directory for transfer (required if --transfer is used).'
+        help='Remote destination directory for SFTP transfer (defaults to home directory if not specified).'
     )
     optional_group.add_argument(
         '--ssh-key',
-        help='Path to the SSH private key for transfer (required if --transfer is used).'
+        help='Path to the SSH private key for SFTP transfer (if not provided, prompts for password).'
     )
     optional_group.add_argument(
         '--ssh-port',
         type=int,
         default=22,
-        help='SSH port for transfer (default: 22).'
+        help='SSH port for SFTP transfer (default: 22).'
     )
     optional_group.add_argument(
         '-h', '--help',
@@ -622,7 +635,7 @@ def main() -> None:
 
     # Validate transfer arguments if --transfer is used
     if args.transfer:
-        required_transfer_args = ['remote_host', 'remote_user', 'remote_dir', 'ssh_key']
+        required_transfer_args = ['remote_host', 'remote_user']
         missing_args = [arg for arg in required_transfer_args if getattr(args, arg) is None]
         if missing_args:
             parser.error(f"The following arguments are required when --transfer is used: {', '.join('--' + arg.replace('_', '-') for arg in missing_args)}")
@@ -643,12 +656,11 @@ def main() -> None:
     logging.info(f"MemberOf Groups: {args.groups}")
     logging.info(f"Expand Proxy: {args.expand_proxy}")
     if args.transfer:
-        logging.info(f"Transfer Enabled: True")
-        logging.info(f"Protocol: {args.protocol.upper()}")
+        logging.info("Transfer Enabled: True")
         logging.info(f"Remote Host: {args.remote_host}")
         logging.info(f"Remote User: {args.remote_user}")
-        logging.info(f"Remote Dir: {args.remote_dir}")
-        logging.info(f"SSH Key: {args.ssh_key}")
+        logging.info(f"Remote Dir: {args.remote_dir if args.remote_dir else 'home directory'}")
+        logging.info(f"SSH Key: {'provided' if args.ssh_key else 'not provided, will prompt for password'}")
         logging.info(f"SSH Port: {args.ssh_port}")
 
     aliases = parse_aliases(args.input_file)
@@ -657,24 +669,23 @@ def main() -> None:
         sys.exit(1)
 
     for alias, targets in sorted(aliases.items()):
-        logging.info(f"{alias}: {targets}")
+        logging.debug(f"{alias}: {targets}")
 
     ldif_content = generate_pps_ldif(aliases, args.domains, args.groups, args.expand_proxy)
     if ldif_content:
         try:
             write_ldif_file(ldif_content, args.output_file)
             if args.transfer:
-                success = secure_transfer(
+                success = secure_sftp_transfer(
                     local_file=str(args.output_file),
                     remote_host=args.remote_host,
                     remote_user=args.remote_user,
                     remote_dir=args.remote_dir,
                     ssh_key=args.ssh_key,
-                    ssh_port=args.ssh_port,
-                    protocol=args.protocol
+                    ssh_port=args.ssh_port
                 )
                 if not success:
-                    logging.error(f"Transfer failed using {args.protocol.upper()}")
+                    logging.error("SFTP transfer failed")
                     sys.exit(1)
         except RuntimeError as e:
             logging.error(str(e))
