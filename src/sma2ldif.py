@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 import argparse
 import logging
 import os
@@ -6,15 +6,14 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone, timedelta
+from getpass import getpass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
 from typing import Dict, List, Set, Optional, Tuple
-from getpass import getpass
-
 import paramiko
 
-EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
+EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\$$ \x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+) $$)$'
 
 # Constants
 DEFAULT_LOG_LEVEL = "warning"
@@ -196,12 +195,13 @@ def secure_sftp_transfer(
         remote_host: str,
         remote_user: str,
         remote_dir: Optional[str] = None,
-        ssh_key: Optional[str] = None,
-        ssh_port: int = 22
+        identity_file: Optional[str] = None,
+        ssh_port: int = 22,
+        password: Optional[str] = None
 ) -> bool:
     """Perform a secure SFTP file transfer to a remote host using Paramiko's SFTP client.
 
-    Supports key-based authentication if ssh_key is provided, or prompts for a password if not.
+    Supports key-based authentication if identity_file is provided, or password authentication if password is provided.
     Compatible with hosts where SCP is disabled, as it uses the SFTP protocol.
 
     Args:
@@ -209,8 +209,9 @@ def secure_sftp_transfer(
         remote_host (str): Remote host address (e.g., IP or domain).
         remote_user (str): Username on the remote host.
         remote_dir (Optional[str]): Destination directory on the remote host (defaults to home directory if None).
-        ssh_key (Optional[str]): Path to the SSH private key file, if using key-based authentication.
+        identity_file (Optional[str]): Path to the SSH private key file, if using key-based authentication.
         ssh_port (int): SSH port number for the connection.
+        password (Optional[str]): Password for authentication, if no identity file is provided.
 
     Returns:
         bool: True if the transfer succeeds, False otherwise.
@@ -228,8 +229,8 @@ def secure_sftp_transfer(
         ssh: paramiko.SSHClient = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        if ssh_key:
-            private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=ssh_key)
+        if identity_file:
+            private_key: paramiko.Ed25519Key = paramiko.Ed25519Key(filename=identity_file)
             ssh.connect(
                 hostname=remote_host,
                 username=remote_user,
@@ -240,7 +241,8 @@ def secure_sftp_transfer(
             )
             logging.info("Authenticated with SSH key for SFTP transfer")
         else:
-            password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
+            if password is None:
+                password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
             ssh.connect(
                 hostname=remote_host,
                 username=remote_user,
@@ -542,8 +544,8 @@ def main() -> None:
 
     This function parses command-line arguments, sets up logging, processes the alias file,
     generates LDIF content, writes it to a local file, and optionally transfers the file to a remote host
-    using Paramiko's SFTP client. If --ssh-key is provided, uses key-based authentication; otherwise,
-    prompts for a password interactively.
+    using Paramiko's SFTP client. If -i/--identity-file is provided, uses key-based authentication;
+    otherwise, prompts for a password interactively.
 
     Args:
         None
@@ -564,7 +566,7 @@ def main() -> None:
     # Required arguments group
     required_group = parser.add_argument_group('Required Arguments')
     required_group.add_argument(
-        '-i', '--input',
+        '--alias-file',
         metavar='<aliases>',
         dest="input_file",
         type=lambda x: validate_file_path(x, check_readable=True),
@@ -572,7 +574,7 @@ def main() -> None:
         help='Path to the input Sendmail aliases file.'
     )
     required_group.add_argument(
-        '-o', '--output',
+        '--ldif-file',
         metavar='<ldif>',
         dest="output_file",
         type=lambda x: validate_file_path(x, check_writable=True),
@@ -641,11 +643,12 @@ def main() -> None:
         help='Remote destination for SFTP transfer in the format username@hostname[:directory] (required if --transfer is used).'
     )
     optional_group.add_argument(
-        '--ssh-key',
-        help='Path to the SSH private key for SFTP transfer (if not provided, prompts for password).'
+        '-i', '--identity-file',
+        dest='identity_file',
+        help='Path to the SSH private key file for SFTP transfer (if not provided, prompts for password).'
     )
     optional_group.add_argument(
-        '-p', '--port',
+        '-p', '--ssh-port',
         type=int,
         default=22,
         help='SSH port for SFTP transfer (defaults to 22).'
@@ -666,6 +669,20 @@ def main() -> None:
     if args.transfer and not args.remote:
         parser.error("The --remote argument is required when --transfer is used")
 
+    # Suppress paramiko's debug logs (e.g., [chan 0] messages)
+    logging.getLogger("paramiko").setLevel(logging.WARNING)
+
+    # Validate aliases file existence early to avoid unnecessary password prompt
+    if not os.path.isfile(args.input_file):
+        logging.error(f"Alias file {args.input_file} does not exist")
+        sys.exit(1)
+
+    # Prompt for password early if transfer is enabled, remote is specified, and no identity file is provided
+    password = None
+    if args.transfer and args.remote and not args.identity_file:
+        remote_user, remote_host, _ = args.remote
+        password = getpass(f"Enter SSH password for {remote_user}@{remote_host}: ")
+
     setup_logging(
         args.log_level,
         args.log_file,
@@ -676,8 +693,8 @@ def main() -> None:
     logging.info(f"Logging Level: {args.log_level}")
     logging.info(f"Max Log Size: {args.log_max_size}")
     logging.info(f"Log Backup Count: {args.log_backup_count}")
-    logging.info(f"Input File: {args.input_file}")
-    logging.info(f"Output File: {args.output_file}")
+    logging.info(f"Alias File: {args.input_file}")
+    logging.info(f"LDIF File: {args.output_file}")
     logging.info(f"Alias Domains: {args.domains}")
     logging.info(f"MemberOf Groups: {args.groups}")
     logging.info(f"Expand Proxy: {args.expand_proxy}")
@@ -687,7 +704,7 @@ def main() -> None:
         logging.info(f"Remote: {remote_user}@{remote_host}")
         logging.info(f"Remote Dir: {remote_dir if remote_dir else 'home directory'}")
         logging.info(f"SSH Port: {args.ssh_port}")
-        logging.info(f"SSH Key: {'provided' if args.ssh_key else 'not provided, will prompt for password'}")
+        logging.info(f"Identity File: {'provided' if args.identity_file else 'not provided, will prompt for password'}")
 
     aliases = parse_aliases(args.input_file)
     if not aliases:
@@ -708,8 +725,9 @@ def main() -> None:
                     remote_host=remote_host,
                     remote_user=remote_user,
                     remote_dir=remote_dir,
-                    ssh_key=args.ssh_key,
-                    ssh_port=args.ssh_port
+                    identity_file=args.identity_file,
+                    ssh_port=args.ssh_port,
+                    password=password
                 )
                 if not success:
                     logging.error("SFTP transfer failed")
