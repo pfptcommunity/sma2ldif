@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Tuple
 from getpass import getpass
 
 import paramiko
@@ -92,8 +92,42 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
     return resolved_path
 
 
+def parse_remote(remote: str) -> Tuple[str, str, Optional[str]]:
+    """Parse a remote specification in the format username@hostname[:directory].
+
+    Args:
+        remote (str): The remote specification to parse.
+
+    Returns:
+        Tuple[str, str, Optional[str]]: A tuple of (username, hostname, directory), where directory is None if not provided.
+
+    Raises:
+        argparse.ArgumentTypeError: If the remote specification is invalid.
+    """
+    if '@' not in remote:
+        raise argparse.ArgumentTypeError(
+            f"Invalid remote specification: {remote}. Must be username@hostname[:directory]")
+
+    username, rest = remote.split('@', 1)
+    if not username:
+        raise argparse.ArgumentTypeError(f"Invalid remote specification: {remote}. Username cannot be empty")
+
+    if ':' in rest:
+        hostname, directory = rest.split(':', 1)
+        if not directory:
+            directory = None
+    else:
+        hostname, directory = rest, None
+
+    if not hostname:
+        raise argparse.ArgumentTypeError(f"Invalid remote specification: {remote}. Hostname cannot be empty")
+
+    return username, hostname, directory
+
+
 class UTCISOFormatter(logging.Formatter):
     """Custom formatter for UTC ISO 8601 timestamps."""
+
     def formatTime(self, record, datefmt=None):
         utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
         return utc_time.isoformat(timespec='milliseconds')
@@ -101,6 +135,7 @@ class UTCISOFormatter(logging.Formatter):
 
 class LocalISOFormatter(logging.Formatter):
     """Custom formatter for local time ISO 8601 timestamps with offset."""
+
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created)
         local_time = localtime(record.created)
@@ -157,12 +192,12 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
 
 
 def secure_sftp_transfer(
-    local_file: str,
-    remote_host: str,
-    remote_user: str,
-    remote_dir: Optional[str] = None,
-    ssh_key: Optional[str] = None,
-    ssh_port: int = 22
+        local_file: str,
+        remote_host: str,
+        remote_user: str,
+        remote_dir: Optional[str] = None,
+        ssh_key: Optional[str] = None,
+        ssh_port: int = 22
 ) -> bool:
     """Perform a secure SFTP file transfer to a remote host using Paramiko's SFTP client.
 
@@ -215,7 +250,8 @@ def secure_sftp_transfer(
             logging.info("Authenticated with password for SFTP transfer")
 
         with ssh.open_sftp() as sftp:
-            remote_path = os.path.join(remote_dir, os.path.basename(local_file)) if remote_dir else os.path.basename(local_file)
+            remote_path = os.path.join(remote_dir, os.path.basename(local_file)) if remote_dir else os.path.basename(
+                local_file)
             sftp.put(local_file, remote_path)
             logging.info(f"Successfully transferred {local_file} to {remote_host}:{remote_path} via SFTP")
 
@@ -600,26 +636,19 @@ def main() -> None:
         help='Enable transfer of the LDIF file to a remote host via SFTP.'
     )
     optional_group.add_argument(
-        '--remote-host',
-        help='Remote host address for SFTP transfer (required if --transfer is used).'
-    )
-    optional_group.add_argument(
-        '--remote-user',
-        help='Remote username for SFTP transfer (required if --transfer is used).'
-    )
-    optional_group.add_argument(
-        '--remote-dir',
-        help='Remote destination directory for SFTP transfer (defaults to home directory if not specified).'
+        '--remote',
+        type=parse_remote,
+        help='Remote destination for SFTP transfer in the format username@hostname[:directory] (required if --transfer is used).'
     )
     optional_group.add_argument(
         '--ssh-key',
         help='Path to the SSH private key for SFTP transfer (if not provided, prompts for password).'
     )
     optional_group.add_argument(
-        '--ssh-port',
+        '-p', '--port',
         type=int,
         default=22,
-        help='SSH port for SFTP transfer (default: 22).'
+        help='SSH port for SFTP transfer (defaults to 22).'
     )
     optional_group.add_argument(
         '-h', '--help',
@@ -634,11 +663,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Validate transfer arguments if --transfer is used
-    if args.transfer:
-        required_transfer_args = ['remote_host', 'remote_user']
-        missing_args = [arg for arg in required_transfer_args if getattr(args, arg) is None]
-        if missing_args:
-            parser.error(f"The following arguments are required when --transfer is used: {', '.join('--' + arg.replace('_', '-') for arg in missing_args)}")
+    if args.transfer and not args.remote:
+        parser.error("The --remote argument is required when --transfer is used")
 
     setup_logging(
         args.log_level,
@@ -656,12 +682,12 @@ def main() -> None:
     logging.info(f"MemberOf Groups: {args.groups}")
     logging.info(f"Expand Proxy: {args.expand_proxy}")
     if args.transfer:
-        logging.info("Transfer Enabled: True")
-        logging.info(f"Remote Host: {args.remote_host}")
-        logging.info(f"Remote User: {args.remote_user}")
-        logging.info(f"Remote Dir: {args.remote_dir if args.remote_dir else 'home directory'}")
-        logging.info(f"SSH Key: {'provided' if args.ssh_key else 'not provided, will prompt for password'}")
+        remote_user, remote_host, remote_dir = args.remote
+        logging.info(f"Transfer Enabled: True")
+        logging.info(f"Remote: {remote_user}@{remote_host}")
+        logging.info(f"Remote Dir: {remote_dir if remote_dir else 'home directory'}")
         logging.info(f"SSH Port: {args.ssh_port}")
+        logging.info(f"SSH Key: {'provided' if args.ssh_key else 'not provided, will prompt for password'}")
 
     aliases = parse_aliases(args.input_file)
     if not aliases:
@@ -676,11 +702,12 @@ def main() -> None:
         try:
             write_ldif_file(ldif_content, args.output_file)
             if args.transfer:
+                remote_user, remote_host, remote_dir = args.remote
                 success = secure_sftp_transfer(
                     local_file=str(args.output_file),
-                    remote_host=args.remote_host,
-                    remote_user=args.remote_user,
-                    remote_dir=args.remote_dir,
+                    remote_host=remote_host,
+                    remote_user=remote_user,
+                    remote_dir=remote_dir,
                     ssh_key=args.ssh_key,
                     ssh_port=args.ssh_port
                 )
