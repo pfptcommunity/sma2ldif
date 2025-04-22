@@ -164,9 +164,9 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
         Dictionary mapping aliases to their target lists.
     """
     aliases: Dict[str, List[str]] = {}
-    current_alias: Optional[str] = None
-    current_target: List[str] = []
     seen_aliases: Set[str] = set()
+    current_alias: Optional[str] = None
+    current_lines: List[str] = []  # Buffer for all lines of the current alias entry
 
     def split_targets(target_str: str) -> List[str]:
         """Split targets by commas, preserving quoted strings."""
@@ -190,6 +190,38 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
             targets.append(current.strip())
         return targets
 
+    def process_entry(alias: str, lines: List[str]) -> None:
+        """Process a complete alias entry, validating and adding to aliases if valid."""
+        # Flatten lines into a single string
+        flattened = lines[0]  # First line (alias: target)
+        if len(lines) > 1:
+            # Append continuation lines, stripping leading whitespace
+            continuation = [line.lstrip() for line in lines[1:]]
+            flattened += ' ' + ' '.join(continuation)
+
+        # Check for spaces or tabs in alias name
+        if ' ' in alias or '\t' in alias:
+            logging.warning(f"Invalid alias name '{alias}' contains spaces or tabs: {flattened.rstrip()}")
+            return
+
+        # Validate and process the entry
+        if alias != alias.lower():
+            logging.warning(f"Uppercase alias '{alias}' may cause issues with nested aliasing.")
+        if alias in seen_aliases:
+            logging.warning(f"Duplicate alias '{alias}' detected. Overwriting previous definition.")
+
+        # Extract target from flattened string
+        match = ALIAS_LINE_REGEX.match(flattened)
+        if not match:
+            logging.warning(f"Invalid alias line skipped: {flattened}")
+            return
+
+        target_str = match.group(2) or ''  # Handle case where target is empty
+        targets = split_targets(target_str)
+
+        aliases[alias] = targets
+        seen_aliases.add(alias)
+
     try:
         with open(file_path, 'r', encoding="utf-8-sig") as f:
             for line in f:
@@ -199,37 +231,30 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
 
                 if line.startswith((' ', '\t')):
                     if current_alias:
-                        current_target.append(line.lstrip())
+                        current_lines.append(line)
                     else:
                         logging.warning(f"Continuation line ignored without alias: {line}")
                     continue
 
+                # Process previous entry if exists
+                if current_alias:
+                    process_entry(current_alias, current_lines)
+                    current_lines = []
+                    current_alias = None
+
+                # Start new entry
                 match = ALIAS_LINE_REGEX.match(line)
                 if match:
-                    if current_alias:
-                        target_str = ' '.join(current_target)
-                        targets = split_targets(target_str)
-                        if current_alias in seen_aliases:
-                            logging.warning(
-                                f"Duplicate alias '{current_alias}' detected. Overwriting previous definition.")
-                        aliases[current_alias] = targets
-                        seen_aliases.add(current_alias)
-                        current_target = []
                     current_alias = match.group(1)
-                    if current_alias != current_alias.lower():
-                        logging.warning(f"Uppercase alias '{current_alias}' may cause issues with nested aliasing.")
-                    if match.group(2):
-                        current_target.append(match.group(2))
+                    current_lines.append(line)
                 else:
                     logging.warning(f"Invalid line skipped: {line}")
+                    current_alias = None
+                    current_lines = []
 
+            # Process the last entry if exists
             if current_alias:
-                target_str = ' '.join(current_target)
-                targets = split_targets(target_str)
-                if current_alias in seen_aliases:
-                    logging.warning(f"Duplicate alias '{current_alias}' detected. Overwriting previous definition.")
-                aliases[current_alias] = targets
-                seen_aliases.add(current_alias)
+                process_entry(current_alias, current_lines)
 
     except FileNotFoundError:
         logging.error(f"Alias file {file_path} not found.")
@@ -245,7 +270,6 @@ def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
         return {}
 
     return aliases
-
 
 def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: str,
                     visited: Optional[Set[str]] = None, max_depth: int = 100) -> List[str]:
