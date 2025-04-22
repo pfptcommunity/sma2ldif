@@ -68,13 +68,13 @@ mail: 1002d@acme.com
 The the example above was generated using the following arguments:
 
 ```
-sma2ldif -i /etc/aliases -o /tmp/aliases.ldif -d acme.com
+sma2ldif --alias-file /etc/aliases --ldif-file /tmp/aliases.ldif -d acme.com
 ```
 
 If other domains are listed with the ```-d``` argument as shown below.
 
 ```
-sma2ldif -i /etc/aliases -o /tmp/aliases.ldif -d acme.com, example.com, foo.com
+sma2ldif --alias-file /etc/aliases --ldif-file /tmp/aliases.ldif -d acme.com, example.com, foo.com
 ```
 
 The result would look similar to the following.
