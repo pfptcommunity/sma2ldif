@@ -94,18 +94,18 @@ proxyAddresses: 1002d@foo.com
 ### Usage
 
 ```
-usage: sma2ldif -i <aliases> -o <ldif> -d <domain> [<domain> ...]
-                [-g <group> [<group> ...]]
+usage: sma2ldif --alias-file <aliases> --ldif-file <ldif> -d <domain>
+                [<domain> ...] [-g <group> [<group> ...]] [-e]
                 [--log-level {debug,info,warning,error,critical}]
                 [-l LOG_FILE] [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT] [-h]
 
 Convert Sendmail alias files to Proofpoint LDIF format.
 
 Required Arguments:
-  -i <aliases>, --input <aliases>                         Path to the input
+  --alias-file <aliases>                                  Path to the input
                                                           Sendmail aliases
                                                           file.
-  -o <ldif>, --output <ldif>                              Path to the output
+  --ldif-file <ldif>                                      Path to the output
                                                           LDIF file.
   -d <domain> [<domain> ...], --domains <domain> [<domain> ...]
                                                           List of domains for
@@ -119,6 +119,9 @@ Optional Arguments:
                                                           groups for LDIF
                                                           entries (default:
                                                           none).
+  -e, --expand-proxy                                      Expand
+                                                          proxyAddresses into
+                                                          unique DN entries.
   --log-level {debug,info,warning,error,critical}         Set the logging
                                                           level (default:
                                                           warning).
@@ -135,4 +138,5 @@ Optional Arguments:
                                                           (default: 5).
   -h, --help                                              Show this help
                                                           message and exit.
+
 ```
