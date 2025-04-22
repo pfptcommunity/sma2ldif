@@ -363,12 +363,20 @@ def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups:
     ldif_entries = []
     if expand_proxy:
         for alias in sorted(aliases.keys()):
-            for domain in domains:
-                ldif_entries.append(create_ldif_entry(alias, domain, groups))
+            if EMAIL_REGEX.match(alias):
+                parts = alias.split('@')
+                ldif_entries.append(create_ldif_entry(parts[0], parts[1], groups))
+            else:
+                for domain in domains:
+                    ldif_entries.append(create_ldif_entry(alias, domain, groups))
     else:
         domain = domains.pop(0)
         for alias in sorted(aliases.keys()):
-            ldif_entries.append(create_ldif_entry(alias, domain, groups, domains))
+            if EMAIL_REGEX.match(alias):
+                parts = alias.split('@')
+                ldif_entries.append(create_ldif_entry(parts[0], parts[1], groups))
+            else:
+                ldif_entries.append(create_ldif_entry(alias, domain, groups, domains))
     return "\n".join(ldif_entries)
 
 
