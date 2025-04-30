@@ -58,7 +58,7 @@ class AliasParser:
         longest (int): Length of the longest RHS.
     """
 
-    def __init__(self, file_path: str, logger: Optional[logging.Logger] = None):
+    def __init__(self, file_path: str, logger: Optional[logging.Logger] = None, exclude_pattern: str = None, include_pattern: str = None):
         """
         Initialize and parse the alias file.
 
@@ -66,6 +66,8 @@ class AliasParser:
             file_path (str): Path to the alias file (e.g., /etc/aliases).
             logger (Optional[logging.Logger]): Logger for error messages. If None,
                 a default logger is created with ERROR level and stderr output.
+            exclude_pattern (str): Regular expression pattern to exclude aliases (e.g., "(postmaster|noreply.*)").
+            include_pattern (str): Regular expression pattern to exclude aliases (e.g., "(postmaster|noreply.*)").
 
         Raises:
             FileNotFoundError: If the alias file does not exist.
@@ -79,6 +81,10 @@ class AliasParser:
         self.__total_bytes: int = 0
         self.__longest: int = 0
         self.__line_number: int = 0
+        self.__filtered_count: int = 0
+        self.__invalid_count: int = 0
+        self.__exclude_pattern = None
+        self.__include_pattern = None
 
         # Set up logger
         if logger is None:
@@ -90,6 +96,20 @@ class AliasParser:
             self.__logger.propagate = False
         else:
             self.__logger = logger
+
+        if exclude_pattern:
+            try:
+                self.__exclude_pattern = re.compile(exclude_pattern)
+            except re.error as e:
+                self.__logger.error(f"Invalid exclude pattern '{exclude_pattern}': {str(e)}")
+                raise
+
+        if include_pattern:
+            try:
+                self.__include_pattern = re.compile(include_pattern)
+            except re.error as e:
+                self.__logger.error(f"Invalid include pattern '{include_pattern}': {str(e)}")
+                raise
 
         # Parse the file during initialization
         try:
@@ -289,15 +309,29 @@ class AliasParser:
         lhs = lhs.strip()
         rhs = rhs.strip()
 
+        # Check if LHS matches the exclude pattern
+        if self.__exclude_pattern and self.__exclude_pattern.search(lhs):
+            self.__logger.debug(f"File {self.__file_path} Line {self.__line_number}: Excluded alias: {lhs}")
+            self.__filtered_count += 1
+            return
+
+        # Check if LHS matches the include pattern (if provided)
+        if self.__include_pattern and not self.__include_pattern.search(lhs):
+            self.__logger.debug(f"File {self.__file_path} Line {self.__line_number}: Skipped non-included alias: {lhs}")
+            self.__filtered_count += 1
+            return
+
         # Validate LHS (mimicking parseaddr)
         if not self.__is_valid_lhs(lhs):
-            self.__logger.error(f"File {self.__file_path} Line {self.__line_number}: Illegal alias name: {lhs[:40]}")
+            self.__logger.warning(f"File {self.__file_path} Line {self.__line_number}: Illegal alias name: {lhs[:40]}")
+            self.__invalid_count += 1
             return
 
         # Check if RHS is empty
         if not rhs:
-            self.__logger.error(
+            self.__logger.warning(
                 f"File {self.__file_path} Line {self.__line_number}: Missing value for alias: {lhs[:40]}")
+            self.__invalid_count += 1
             return
 
         # Special case: lowercase 'postmaster'
@@ -339,6 +373,16 @@ class AliasParser:
     def longest(self) -> int:
         """Length of the longest RHS."""
         return self.__longest
+
+    @property
+    def filtered_count(self) -> int:
+        """Length of the longest RHS."""
+        return self.__filtered_count
+
+    @property
+    def invalid_count(self) -> int:
+        """Length of the longest RHS."""
+        return self.__invalid_count
 
 
 def log_level_type(level: str) -> str:
@@ -694,6 +738,20 @@ def main() -> None:
         action='store_true',
         help='Expand proxyAddresses into unique DN entries.')
     optional.add_argument(
+        '--exclude',
+        metavar='PATTERN',
+        dest='exclude_pattern',
+        default=None,
+        help='Regular expression pattern to exclude aliases. Use \'=\' before patterns starting with a hyphen. (e.g. --exclude="-(approval|outgoing|request)$")'
+    )
+    optional.add_argument(
+        '--include',
+        metavar='PATTERN',
+        dest='include_pattern',
+        default=None,
+        help='Regular expression pattern to include aliases. Use \'=\' before patterns starting with a hyphen. (e.g. --include="-(approval|outgoing|request)$")'
+    )
+    optional.add_argument(
         '--log-level',
         default=DEFAULT_LOG_LEVEL,
         type=log_level_type,
@@ -745,9 +803,11 @@ def main() -> None:
     logger.info(f"Alias Domains: {args.domains}")
     logger.info(f"MemberOf Groups: {args.groups}")
 
-    parser = AliasParser(args.input_file, logger)
+    parser = AliasParser(args.input_file, logger, args.exclude_pattern, args.include_pattern)
 
-    logger.info(f"Total Aliases: {parser.alias_count}")
+    logger.info(f"Total Valid Aliases: {parser.alias_count}")
+    logger.info(f"Total Filtered Aliases: {parser.filtered_count}")
+    logger.info(f"Total Invalid Aliases: {parser.invalid_count}")
     logger.info(f"Longest Alias: {parser.longest}")
     logger.info(f"Total Bytes: {parser.total_bytes}")
 
@@ -757,7 +817,7 @@ def main() -> None:
         sys.exit(1)
 
     for alias, targets in sorted(aliases.items()):
-        logger.info(f"{alias}: {targets}")
+        logger.debug(f"{alias}: {targets}")
 
     ldif_content = generate_pps_ldif(aliases, args.domains, args.groups, args.expand_proxy)
     if ldif_content:
