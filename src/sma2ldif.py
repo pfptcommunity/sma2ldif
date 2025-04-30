@@ -9,20 +9,303 @@ from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Optional
 
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
-
 # Constants
 DEFAULT_LOG_LEVEL = "warning"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 5
 DEFAULT_LOG_FILE = "sma2ldif.log"
 VALID_DOMAIN_REGEX = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.[a-z]{2,63}){1,2}$", re.IGNORECASE)
-ALIAS_LINE_REGEX = re.compile(r'^([^:]+):\s*(.*)$')
 EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)
-LOCAL_USER_REGEX = re.compile(r'^[\w\-]+$', re.IGNORECASE)
 SMA2LDIF_NAMESPACE = uuid.UUID("c11859e0-d9ce-4f59-826c-a5dc23d1bf1e")
+
+# Alias parser is a port from the sendmail alias.c file with minor pythonic modifications
+MAXNAME = 256  # Maximum length of address
+MAXATOM = 40  # Maximum number of tokens
+
+
+class AliasParser:
+    """
+    A class to parse Sendmail-style alias files, replicating the behavior of
+    Sendmail's readaliases function with parseaddr validation. Parses the file
+    during initialization, storing aliases and statistics.
+
+    Attributes:
+        file_path (str): Path to the alias file.
+        aliases (Dict[str, str]): Dictionary of parsed alias mappings (LHS -> RHS).
+        alias_count (int): Number of aliases parsed.
+        total_bytes (int): Total bytes in LHS and RHS of all aliases.
+        longest (int): Length of the longest RHS.
+    """
+
+    def __init__(self, file_path: str, logger: Optional[logging.Logger] = None):
+        """
+        Initialize and parse the alias file.
+
+        Args:
+            file_path (str): Path to the alias file (e.g., /etc/aliases).
+            logger (Optional[logging.Logger]): Logger for error messages. If None,
+                a default logger is created with ERROR level and stderr output.
+
+        Raises:
+            IOError: If the file cannot be opened or read.
+        """
+        self.__file_path = file_path
+        self.__aliases: Dict[str, str] = {}
+        self.__naliases: int = 0
+        self.__total_bytes: int = 0
+        self.__longest: int = 0
+        self.__line_number: int = 0
+
+        # Set up logger
+        if logger is None:
+            self.__logger = logging.getLogger('sendmail.aliasparser')
+            self.__logger.setLevel(logging.ERROR)
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(logging.Formatter('554 5.3.5 %(message)s'))
+            self.__logger.addHandler(handler)
+            self.__logger.propagate = False
+        else:
+            self.__logger = logger
+
+        # Parse the file during initialization
+        try:
+            with open(self.__file_path, 'r', encoding='utf-8-sig') as af:
+                line = ''
+                while True:
+                    # Read the next line
+                    raw_line = af.readline()
+                    self.__line_number += 1
+
+                    # Check for EOF
+                    if not raw_line:
+                        if line:
+                            # Process any remaining line (no trailing newline)
+                            self.__process_line(line)
+                        break
+
+                    # Remove trailing newline
+                    raw_line = raw_line.rstrip('\n')
+                    line += raw_line
+
+                    # Handle continuation lines
+                    while self.__is_continuation_line(line, af):
+                        next_line = af.readline()
+                        self.__line_number += 1
+                        if not next_line:
+                            break
+                        next_line = next_line.rstrip('\n')
+                        # Remove backslash for backslash-continued lines
+                        if line.endswith('\\'):
+                            line = line[:-1] + next_line
+                        else:
+                            line += next_line
+
+                    # Process the complete line
+                    self.__process_line(line)
+                    line = ''
+        except FileNotFoundError:
+            logging.error(f"Alias file {self.__file_path} not found.")
+            raise
+        except PermissionError:
+            logging.error(f"Permission denied accessing {self.__file_path}.")
+            raise
+        except UnicodeDecodeError as e:
+            logging.error(f"Encoding error in {self.__file_path}: {str(e)}")
+            raise
+        except Exception as e:
+            logging.error(f"Failed to parse {self.__file_path}: {str(e)}")
+            raise
+
+    def __is_continuation_line(self, line: str, file_obj) -> bool:
+        """
+        Check if the current line is continued (backslash or leading whitespace).
+
+        Args:
+            line (str): Current line.
+            file_obj: File object to peek at the next character.
+
+        Returns:
+            bool: True if the line is continued, False otherwise.
+        """
+        if line.endswith('\\'):
+            return True
+
+        # Peek at the next character
+        pos = file_obj.tell()
+        next_char = file_obj.read(1)
+        file_obj.seek(pos)
+
+        return next_char in ' \t'
+
+    def __is_valid_lhs(self, lhs: str) -> bool:
+        """
+        Validate the LHS of an alias, mimicking Sendmail's parseaddr.
+
+        Args:
+            lhs (str): The left-hand side (alias name) to validate.
+
+        Returns:
+            bool: True if valid, False if invalid (e.g., whitespace, unbalanced quotes).
+        """
+        if not lhs or len(lhs) > MAXNAME - 1:
+            return False
+
+        # Check for whitespace, control characters, and balanced delimiters
+        quote_count = 0
+        paren_count = 0
+        angle_count = 0
+        bslash = False
+        tokens = 0
+        token_length = 0
+        i = 0
+
+        while i < len(lhs):
+            c = lhs[i]
+
+            # Handle backslash escaping
+            if bslash:
+                bslash = False
+                token_length += 1
+                i += 1
+                continue
+
+            if c == '\\':
+                bslash = True
+                i += 1
+                continue
+
+            # Handle quotes
+            if c == '"':
+                quote_count += 1
+                i += 1
+                continue
+
+            # Handle parentheses (comments)
+            if c == '(' and quote_count % 2 == 0:
+                paren_count += 1
+            elif c == ')' and quote_count % 2 == 0:
+                paren_count -= 1
+            # Handle angle brackets
+            elif c == '<' and quote_count % 2 == 0:
+                angle_count += 1
+            elif c == '>' and quote_count % 2 == 0:
+                angle_count -= 1
+            # Check for whitespace or control characters outside quotes
+            elif (quote_count % 2 == 0 and
+                  (c.isspace() or ord(c) < 32 or ord(c) == 127)):
+                return False
+            # Count tokens (simplified: split on operators)
+            elif c in '()<>,' and quote_count % 2 == 0:
+                if token_length > 0:
+                    tokens += 1
+                    if tokens >= MAXATOM:
+                        return False
+                    if token_length > MAXNAME:
+                        return False
+                    token_length = 0
+            else:
+                token_length += 1
+
+            if token_length > MAXNAME:
+                return False
+
+            i += 1
+
+        # Check for balanced delimiters
+        if quote_count % 2 != 0 or paren_count != 0 or angle_count != 0:
+            return False
+
+        # Final token
+        if token_length > 0:
+            tokens += 1
+            if tokens >= MAXATOM:
+                return False
+
+        return True
+
+    def __process_line(self, line: str) -> None:
+        """
+        Process a single line (or continued line) from the alias file.
+
+        Args:
+            line (str): The line to process.
+
+        Updates:
+            self.__aliases, self.__naliases, self.__total_bytes, self.__longest
+        """
+        # Skip empty lines or comments
+        if not line or line.startswith('#'):
+            return
+
+        # Check for invalid continuation line (starts with space/tab but not a continuation)
+        if line[0] in ' \t':
+            self.__logger.error(
+                f"File {self.__file_path} Line {self.__line_number}: Non-continuation line starts with space")
+            return
+
+        # Split on the first colon
+        parts = line.split(':', 1)
+        if len(parts) < 2:
+            self.__logger.error(f"File {self.__file_path} Line {self.__line_number}: Missing colon")
+            return
+
+        lhs, rhs = parts
+        lhs = lhs.strip()
+        rhs = rhs.strip()
+
+        # Validate LHS (mimicking parseaddr)
+        if not self.__is_valid_lhs(lhs):
+            self.__logger.error(f"File {self.__file_path} Line {self.__line_number}: Illegal alias name: {lhs[:40]}")
+            return
+
+        # Check if RHS is empty
+        if not rhs:
+            self.__logger.error(
+                f"File {self.__file_path} Line {self.__line_number}: Missing value for alias: {lhs[:40]}")
+            return
+
+        # Special case: lowercase 'postmaster'
+        if lhs.lower() == 'postmaster':
+            lhs = 'postmaster'
+
+        # Store the alias
+        self.__aliases[lhs] = rhs
+        self.__naliases += 1
+
+        # Update statistics
+        lhs_size = len(lhs)
+        rhs_size = len(rhs)
+        self.__total_bytes += lhs_size + rhs_size
+        if rhs_size > self.__longest:
+            self.__longest = rhs_size
+
+    @property
+    def file_path(self) -> str:
+        """Path to the alias file."""
+        return self.__file_path
+
+    @property
+    def aliases(self) -> Dict[str, str]:
+        """Dictionary of parsed alias mappings (LHS -> RHS)."""
+        return self.__aliases.copy()
+
+    @property
+    def alias_count(self) -> int:
+        """Number of aliases parsed."""
+        return self.__naliases
+
+    @property
+    def total_bytes(self) -> int:
+        """Total bytes in LHS and RHS of all aliases."""
+        return self.__total_bytes
+
+    @property
+    def longest(self) -> int:
+        """Length of the longest RHS."""
+        return self.__longest
 
 
 def log_level_type(level: str) -> str:
@@ -126,216 +409,6 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     logging.getLogger('').addHandler(file_handler)
 
 
-def classify_target(target: str, aliases: Dict[str, List[str]]) -> str:
-    """Classify the type of target.
-
-    Args:
-        target: The target string to classify.
-        aliases: Dictionary of known aliases.
-
-    Returns:
-        String indicating target type (command, file, include, email, alias, local_user, invalid).
-    """
-    target = target.strip()
-    if target.startswith('"|') and target.endswith('"'):
-        return 'command'
-    if target.startswith('|'):
-        return 'command'
-    if target.startswith('/'):
-        return 'file'
-    if target.startswith(':include:'):
-        return 'include'
-    if '@' in target and EMAIL_REGEX.match(target):
-        return 'email'
-    if target in aliases:
-        return 'alias'
-    if LOCAL_USER_REGEX.match(target):
-        return 'local_user'
-    return 'invalid'
-
-
-def parse_aliases(file_path: Path) -> Dict[str, List[str]]:
-    """Parse a sendmail alias file into a dictionary.
-
-    Args:
-        file_path: Path to the alias file.
-
-    Returns:
-        Dictionary mapping aliases to their target lists.
-    """
-    aliases: Dict[str, List[str]] = {}
-    seen_aliases: Set[str] = set()
-    current_alias: Optional[str] = None
-    current_lines: List[str] = []  # Buffer for all lines of the current alias entry
-
-    def split_targets(target_str: str) -> List[str]:
-        """Split targets by commas, preserving quoted strings."""
-        targets = []
-        current = ''
-        in_quotes = False
-        i = 0
-        while i < len(target_str):
-            char = target_str[i]
-            if char == '"' and (i == 0 or target_str[i - 1] != '\\'):
-                in_quotes = not in_quotes
-                current += char
-            elif char == ',' and not in_quotes:
-                if current.strip():
-                    targets.append(current.strip())
-                current = ''
-            else:
-                current += char
-            i += 1
-        if current.strip():
-            targets.append(current.strip())
-        return targets
-
-    def process_entry(alias: str, lines: List[str]) -> None:
-        """Process a complete alias entry, validating and adding to aliases if valid."""
-        # Flatten lines into a single string
-        flattened = lines[0]  # First line (alias: target)
-        if len(lines) > 1:
-            # Append continuation lines, stripping leading whitespace
-            continuation = [line.lstrip() for line in lines[1:]]
-            flattened += ' ' + ' '.join(continuation)
-
-        # Check for spaces or tabs in alias name
-        if ' ' in alias or '\t' in alias:
-            logging.warning(f"Invalid alias name '{alias}' contains spaces or tabs: {flattened.rstrip()}")
-            return
-
-        # Validate and process the entry
-        if alias != alias.lower():
-            logging.warning(f"Uppercase alias '{alias}' may cause issues with nested aliasing.")
-        if alias in seen_aliases:
-            logging.warning(f"Duplicate alias '{alias}' detected. Overwriting previous definition.")
-
-        # Extract target from flattened string
-        match = ALIAS_LINE_REGEX.match(flattened)
-        if not match:
-            logging.warning(f"Invalid alias line skipped: {flattened}")
-            return
-
-        target_str = match.group(2) or ''  # Handle case where target is empty
-        targets = split_targets(target_str)
-
-        aliases[alias] = targets
-        seen_aliases.add(alias)
-
-    try:
-        with open(file_path, 'r', encoding="utf-8-sig") as f:
-            for line in f:
-                line = line.rstrip()
-                if not line or line.startswith('#'):
-                    continue
-
-                if line.startswith((' ', '\t')):
-                    if current_alias:
-                        current_lines.append(line)
-                    else:
-                        logging.warning(f"Continuation line ignored without alias: {line}")
-                    continue
-
-                # Process previous entry if exists
-                if current_alias:
-                    process_entry(current_alias, current_lines)
-                    current_lines = []
-                    current_alias = None
-
-                # Start new entry
-                match = ALIAS_LINE_REGEX.match(line)
-                if match:
-                    current_alias = match.group(1)
-                    current_lines.append(line)
-                else:
-                    logging.warning(f"Invalid line skipped: {line}")
-                    current_alias = None
-                    current_lines = []
-
-            # Process the last entry if exists
-            if current_alias:
-                process_entry(current_alias, current_lines)
-
-    except FileNotFoundError:
-        logging.error(f"Alias file {file_path} not found.")
-        return {}
-    except PermissionError:
-        logging.error(f"Permission denied accessing {file_path}.")
-        return {}
-    except UnicodeDecodeError as e:
-        logging.error(f"Encoding error in {file_path}: {str(e)}")
-        return {}
-    except Exception as e:
-        logging.error(f"Failed to parse {file_path}: {str(e)}")
-        return {}
-
-    return aliases
-
-def resolve_targets(targets: List[str], aliases: Dict[str, List[str]], domain: str,
-                    visited: Optional[Set[str]] = None, max_depth: int = 100) -> List[str]:
-    """Recursively resolve targets to emails or local users.
-
-    Args:
-        targets: List of targets to resolve.
-        aliases: Dictionary of aliases.
-        domain: Domain to append to local users.
-        visited: Set of visited aliases to detect circular references.
-        max_depth: Maximum recursion depth to prevent stack overflow.
-
-    Returns:
-        List of resolved email addresses.
-    """
-    if visited is None:
-        visited = set()
-
-    if max_depth <= 0:
-        logging.error("Maximum recursion depth exceeded in alias resolution")
-        return []
-
-    resolved = []
-
-    for target in targets:
-        target_type = classify_target(target, aliases)
-
-        if target_type == 'email':
-            resolved.append(target)
-        elif target_type == 'local_user':
-            resolved.append(f"{target}@{domain}")
-        elif target_type == 'alias':
-            if target in visited:
-                logging.warning(f"Circular reference detected for alias '{target}'")
-                continue
-            visited.add(target)
-            if target in aliases:
-                sub_targets = resolve_targets(aliases[target], aliases, domain, visited.copy(), max_depth - 1)
-                resolved.extend(sub_targets)
-            else:
-                logging.warning(f"Alias '{target}' not found in alias map")
-            visited.remove(target)
-        elif target_type == 'include':
-            file_path = target[len(':include:'):]
-            try:
-                file_path = validate_file_path(file_path, check_readable=True)
-                with open(file_path, 'r', encoding="utf-8-sig") as f:
-                    file_targets = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-                sub_targets = resolve_targets(file_targets, aliases, domain, visited.copy(), max_depth - 1)
-                resolved.extend(sub_targets)
-            except FileNotFoundError:
-                logging.warning(f"Include file '{file_path}' not found")
-            except PermissionError:
-                logging.warning(f"Permission denied accessing include file '{file_path}'")
-            except UnicodeDecodeError as e:
-                logging.warning(f"Encoding error in include file '{file_path}': {str(e)}")
-            except Exception as e:
-                logging.warning(f"Failed to read include file '{file_path}': {str(e)}")
-        else:
-            logging.warning(f"Skipping non-email target '{target}' ({target_type})")
-
-    # Remove duplicates while preserving order
-    seen = set()
-    return [t for t in resolved if not (t in seen or seen.add(t))]
-
-
 def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains: Optional[List[str]] = None) -> str:
     """Create a single LDIF entry."""
     alias_email = f"{alias}@{domain}"
@@ -358,7 +431,7 @@ def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains:
     return "\n".join(entry)
 
 
-def generate_pps_ldif(aliases: Dict[str, List[str]], domains: List[str], groups: List[str], expand_proxy: bool) -> str:
+def generate_pps_ldif(aliases: Dict[str, str], domains: List[str], groups: List[str], expand_proxy: bool) -> str:
     """Generate LDIF content for Proofpoint."""
     ldif_entries = []
     if expand_proxy:
@@ -386,7 +459,6 @@ def write_ldif_file(ldif_content: str, output_file: Path) -> None:
     Args:
         ldif_content: LDIF content to write.
         output_file: Path to the output file.
-        force: If True, overwrite existing file.
 
     Raises:
         RuntimeError: If output file exists and force is False.
@@ -502,7 +574,13 @@ def main() -> None:
     logging.info(f"Alias Domains: {args.domains}")
     logging.info(f"MemberOf Groups: {args.groups}")
 
-    aliases = parse_aliases(args.input_file)
+    parser = AliasParser(args.input_file, logging.getLogger())
+
+    logging.info(f"Total Aliases: {parser.alias_count}")
+    logging.info(f"Longest Alias: {parser.longest}")
+    logging.info(f"Total Bytes: {parser.total_bytes}")
+
+    aliases = parser.aliases
     if not aliases:
         logging.error("No aliases to process.")
         sys.exit(1)
