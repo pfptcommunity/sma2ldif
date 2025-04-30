@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Convert Sendmail alias files to Proofpoint LDIF format.
+
+This script parses a Sendmail-style alias file using a port of Sendmail's
+`readaliases` and `parseaddr` functions, validates aliases, and generates LDIF
+entries for Proofpoint. It supports domain mapping, group assignments, and proxy
+address expansion, with configurable logging to a rotating file.
+"""
+
 import argparse
 import logging
 import os
@@ -6,30 +15,39 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone, timedelta
+from logging import Logger
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import localtime
 from typing import Dict, List, Optional
 
+# Regular expression for validating email addresses per RFC 5322
 EMAIL_ADDRESS_REGEX = r'^(?:[a-z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$'
-# Constants
-DEFAULT_LOG_LEVEL = "warning"
-DEFAULT_MAX_BYTES = 10 * 1024 * 1024
-DEFAULT_BACKUP_COUNT = 5
-DEFAULT_LOG_FILE = "sma2ldif.log"
-VALID_DOMAIN_REGEX = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.[a-z]{2,63}){1,2}$", re.IGNORECASE)
-EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)
+
+# Constants for logging configuration
+DEFAULT_LOG_LEVEL = "warning"  # Default logging level
+DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # Default max log file size (10MB)
+DEFAULT_BACKUP_COUNT = 5  # Default number of backup log files
+DEFAULT_LOG_FILE = "sma2ldif.log"  # Default log file name
+
+# Regular expressions for validation
+VALID_DOMAIN_REGEX = re.compile(
+    r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.[a-z]{2,63}){1,2}$", re.IGNORECASE
+)  # Validates domain syntax (e.g., example.com, sub.example.co.uk)
+EMAIL_REGEX = re.compile(EMAIL_ADDRESS_REGEX, re.IGNORECASE)  # Compiled email regex
+
+# UUID namespace for generating deterministic UIDs in LDIF entries
 SMA2LDIF_NAMESPACE = uuid.UUID("c11859e0-d9ce-4f59-826c-a5dc23d1bf1e")
 
-# Alias parser is a port from the sendmail alias.c file with minor pythonic modifications
-MAXNAME = 256  # Maximum length of address
-MAXATOM = 40  # Maximum number of tokens
+# Constants for alias parsing (from Sendmail)
+MAXNAME = 256  # Maximum length of an alias address
+MAXATOM = 40  # Maximum number of tokens in an alias
 
 
 class AliasParser:
     """
     A class to parse Sendmail-style alias files, replicating the behavior of
-    Sendmail's readaliases function with parseaddr validation. Parses the file
+    Sendmail's `readaliases` function with `parseaddr` validation. Parses the file
     during initialization, storing aliases and statistics.
 
     Attributes:
@@ -50,7 +68,10 @@ class AliasParser:
                 a default logger is created with ERROR level and stderr output.
 
         Raises:
-            IOError: If the file cannot be opened or read.
+            FileNotFoundError: If the alias file does not exist.
+            PermissionError: If the file cannot be read due to permissions.
+            UnicodeDecodeError: If the file cannot be decoded as UTF-8.
+            Exception: For other parsing errors.
         """
         self.__file_path = file_path
         self.__aliases: Dict[str, str] = {}
@@ -107,21 +128,24 @@ class AliasParser:
                     self.__process_line(line)
                     line = ''
         except FileNotFoundError:
-            logging.error(f"Alias file {self.__file_path} not found.")
+            self.__logger.error(f"Alias file {self.__file_path} not found.")
             raise
         except PermissionError:
-            logging.error(f"Permission denied accessing {self.__file_path}.")
+            self.__logger.error(f"Permission denied accessing {self.__file_path}.")
             raise
         except UnicodeDecodeError as e:
-            logging.error(f"Encoding error in {self.__file_path}: {str(e)}")
+            self.__logger.error(f"Encoding error in {self.__file_path}: {str(e)}")
             raise
         except Exception as e:
-            logging.error(f"Failed to parse {self.__file_path}: {str(e)}")
+            self.__logger.error(f"Failed to parse {self.__file_path}: {str(e)}")
             raise
 
     def __is_continuation_line(self, line: str, file_obj) -> bool:
         """
         Check if the current line is continued (backslash or leading whitespace).
+
+        A line is continued if it ends with a backslash or if the next line starts
+        with a space or tab, per Sendmail's alias file format.
 
         Args:
             line (str): Current line.
@@ -142,7 +166,12 @@ class AliasParser:
 
     def __is_valid_lhs(self, lhs: str) -> bool:
         """
-        Validate the LHS of an alias, mimicking Sendmail's parseaddr.
+        Validate the left-hand side (LHS) of an alias, mimicking Sendmail's parseaddr.
+
+        Ensures the LHS adheres to Sendmail's alias syntax, allowing RFC 5322 local-part
+        characters (alphanumeric, '.', '_', '-', '@', '!', '#', etc.), rejecting unquoted
+        whitespace or control characters, and checking for balanced quotes, parentheses,
+        and angle brackets. Enforces maximum length (MAXNAME) and token count (MAXATOM).
 
         Args:
             lhs (str): The left-hand side (alias name) to validate.
@@ -230,6 +259,10 @@ class AliasParser:
         """
         Process a single line (or continued line) from the alias file.
 
+        Parses a line into left-hand side (LHS) and right-hand side (RHS), validates
+        the LHS, ensures the RHS is non-empty, and stores the alias mapping. Updates
+        statistics (alias count, total bytes, longest RHS).
+
         Args:
             line (str): The line to process.
 
@@ -289,7 +322,7 @@ class AliasParser:
 
     @property
     def aliases(self) -> Dict[str, str]:
-        """Dictionary of parsed alias mappings (LHS -> RHS)."""
+        """Dictionary of parsed alias mappings (LHS -> RHS). Returns a copy to prevent modification."""
         return self.__aliases.copy()
 
     @property
@@ -309,8 +342,22 @@ class AliasParser:
 
 
 def log_level_type(level: str) -> str:
-    """Custom type to make log level case-insensitive."""
-    level = level.lower()  # Normalize to uppercase
+    """
+    Custom argument type to validate and normalize log levels.
+
+    Ensures the log level is one of 'debug', 'info', 'warning', 'error', or 'critical',
+    case-insensitively.
+
+    Args:
+        level (str): The log level string to validate.
+
+    Returns:
+        str: The normalized (lowercase) log level.
+
+    Raises:
+        argparse.ArgumentTypeError: If the log level is invalid.
+    """
+    level = level.lower()  # Normalize to lowercase
     valid_levels = ['debug', 'info', 'warning', 'error', 'critical']
     if level not in valid_levels:
         raise argparse.ArgumentTypeError(
@@ -320,14 +367,44 @@ def log_level_type(level: str) -> str:
 
 
 def is_valid_domain_syntax(domain_name: str) -> str:
-    """Validate domain name syntax using regex."""
+    """
+    Validate domain name syntax using a regular expression.
+
+    Ensures the domain follows standard syntax (e.g., 'example.com', 'sub.example.co.uk'),
+    rejecting invalid formats (e.g., '-example.com', 'example.').
+
+    Args:
+        domain_name (str): The domain name to validate.
+
+    Returns:
+        str: The validated domain name.
+
+    Raises:
+        argparse.ArgumentTypeError: If the domain syntax is invalid.
+    """
     if not VALID_DOMAIN_REGEX.match(domain_name):
         raise argparse.ArgumentTypeError(f"Invalid domain name syntax: {domain_name}")
     return domain_name
 
 
 def validate_file_path(path: str, check_readable: bool = False, check_writable: bool = False) -> Path:
-    """Validate and resolve file path."""
+    """
+    Validate and resolve a file path.
+
+    Checks if the path is readable (for input files) or writable (for output/log files),
+    ensuring the parent directory exists and is accessible.
+
+    Args:
+        path (str): The file path to validate.
+        check_readable (bool): If True, ensure the file exists and is readable.
+        check_writable (bool): If True, ensure the parent directory is writable.
+
+    Returns:
+        Path: The resolved pathlib.Path object.
+
+    Raises:
+        argparse.ArgumentTypeError: If the path is invalid or inaccessible.
+    """
     resolved_path = Path(path).resolve()
     if check_readable and not resolved_path.is_file():
         raise argparse.ArgumentTypeError(f"File not found or not readable: {path}")
@@ -340,16 +417,47 @@ def validate_file_path(path: str, check_readable: bool = False, check_writable: 
     return resolved_path
 
 
-# Custom formatter for UTC ISO 8601 timestamps
 class UTCISOFormatter(logging.Formatter):
+    """
+    Custom logging formatter for UTC ISO 8601 timestamps.
+
+    Formats log timestamps in ISO 8601 format with UTC timezone and millisecond precision.
+    """
+
     def formatTime(self, record, datefmt=None):
+        """
+        Format the log record's timestamp as UTC ISO 8601 with milliseconds.
+
+        Args:
+            record: The log record containing the timestamp.
+            datefmt: Unused, included for compatibility.
+
+        Returns:
+            str: The formatted timestamp (e.g., '2023-10-01T12:00:00.123Z').
+        """
         utc_time = datetime.fromtimestamp(record.created, tz=timezone.utc)
         return utc_time.isoformat(timespec='milliseconds')
 
 
-# Custom formatter for local time ISO 8601 timestamps with offset
 class LocalISOFormatter(logging.Formatter):
+    """
+    Custom logging formatter for local time ISO 8601 timestamps with timezone offset.
+
+    Formats log timestamps in ISO 8601 format with the local timezone offset and
+    millisecond precision.
+    """
+
     def formatTime(self, record, datefmt=None):
+        """
+        Format the log record's timestamp as local time ISO 8601 with offset.
+
+        Args:
+            record: The log record containing the timestamp.
+            datefmt: Unused, included for compatibility.
+
+        Returns:
+            str: The formatted timestamp (e.g., '2023-10-01T12:00:00.123-04:00').
+        """
         # Convert the log record's timestamp to a datetime object
         dt = datetime.fromtimestamp(record.created)
         # Get the local timezone offset from time.localtime()
@@ -362,17 +470,22 @@ class LocalISOFormatter(logging.Formatter):
         return dt.isoformat(timespec='milliseconds')
 
 
-def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> None:
-    """Set up logging with a rotating file handler, without console output, using local time with offset.
+def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: int) -> Logger:
+    """
+    Set up logging with a rotating file handler, without console output, using local time with offset.
+
+    Configures the 'sma2ldif' logger with a rotating file handler, setting the specified log level
+    and log file parameters. Uses ISO 8601 timestamps with local timezone offset.
 
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        log_level: Logging level ('debug', 'info', 'warning', 'error', 'critical').
         log_file: Path to the log file.
         max_bytes: Maximum size of each log file before rotation (in bytes).
         backup_count: Number of backup log files to keep.
 
     Raises:
         ValueError: If log_level is invalid or log_file path is invalid.
+        OSError: If the log file handler cannot be created.
     """
     # Validate log file path
     log_file_path = validate_file_path(log_file, check_writable=True)
@@ -382,11 +495,10 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
 
-    # Clear any existing handlers to prevent duplicate logging
-    logging.getLogger('').handlers.clear()
-
-    # Set up the root logger
-    logging.getLogger('').setLevel(numeric_level)
+    # Set up the named logger
+    logger = logging.getLogger('sma2ldif')
+    logger.handlers.clear()
+    logger.setLevel(numeric_level)
 
     # Create rotating file handler
     try:
@@ -405,12 +517,36 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     formatter = LocalISOFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
     file_handler.setFormatter(formatter)
 
-    # Add only the file handler to the root logger
-    logging.getLogger('').addHandler(file_handler)
+    # Add only the file handler to the logger
+    logger.addHandler(file_handler)
+
+    return logger
 
 
 def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains: Optional[List[str]] = None) -> str:
-    """Create a single LDIF entry."""
+    """
+    Create a single LDIF entry for Proofpoint.
+
+    Generates an LDIF entry with a distinguished name (dn), UUID-based uid, and
+    Proofpoint-specific fields (description, givenName, sn, profileType, mail).
+    Optionally includes proxyAddresses for additional domains and memberOf groups.
+
+    Args:
+        alias (str): The alias name (LHS or local part of the email address).
+        domain (str): The primary domain for the email address.
+        groups (List[str]): List of memberOf groups for the entry.
+        proxy_domains (Optional[List[str]]): Additional domains for proxyAddresses.
+
+    Returns:
+        str: LDIF entry string with fields required by Proofpoint.
+
+    Notes:
+        - The uid is generated using UUID5 based on the alias@domain for uniqueness.
+        - Hardcoded fields:
+          - description: "Auto generated by sma2ldif" (metadata for Proofpoint).
+          - profileType: "1" (Proofpoint-specific profile identifier).
+          - sn: "sma2ldif" (surname field, set to tool name for consistency).
+    """
     alias_email = f"{alias}@{domain}"
     uid = uuid.uuid5(SMA2LDIF_NAMESPACE, alias_email)
     entry = [
@@ -432,7 +568,29 @@ def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains:
 
 
 def generate_pps_ldif(aliases: Dict[str, str], domains: List[str], groups: List[str], expand_proxy: bool) -> str:
-    """Generate LDIF content for Proofpoint."""
+    """
+    Generate LDIF content for Proofpoint from parsed aliases.
+
+    Creates LDIF entries for each alias, either expanding aliases across multiple
+    domains (expand_proxy=True) or using the first domain as primary with others
+    as proxyAddresses (expand_proxy=False). Email-like aliases (e.g., user@domain)
+    retain their original domain.
+
+    Args:
+        aliases (Dict[str, str]): Dictionary of alias mappings (LHS -> RHS).
+        domains (List[str]): List of domains, with the first as primary if not expanding.
+        groups (List[str]): List of memberOf groups for each LDIF entry.
+        expand_proxy (bool): If True, create separate entries for each domain;
+                            if False, use proxyAddresses for additional domains.
+
+    Returns:
+        str: LDIF content as a newline-separated string of entries.
+
+    Notes:
+        - Sorts aliases for consistent output.
+        - Email-like aliases are validated with EMAIL_REGEX (RFC 5322).
+        - When expand_proxy=False, modifies the domains list by popping the first element.
+    """
     ldif_entries = []
     if expand_proxy:
         for alias in sorted(aliases.keys()):
@@ -453,28 +611,41 @@ def generate_pps_ldif(aliases: Dict[str, str], domains: List[str], groups: List[
     return "\n".join(ldif_entries)
 
 
-def write_ldif_file(ldif_content: str, output_file: Path) -> None:
-    """Write LDIF content to a file.
+def write_ldif_file(ldif_content: str, output_file: Path, logger: Logger) -> None:
+    """
+    Write LDIF content to a file.
 
     Args:
-        ldif_content: LDIF content to write.
-        output_file: Path to the output file.
+        ldif_content (str): LDIF content to write.
+        output_file (Path): Path to the output file.
+        logger (Logger): Logger instance.
 
     Raises:
-        RuntimeError: If output file exists and force is False.
+        PermissionError: If the file cannot be written due to permissions.
+        OSError: For other file writing errors.
     """
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(ldif_content)
-        logging.info(f"LDIF file written to {output_file}")
+        logger.info(f"LDIF file written to {output_file}")
     except PermissionError:
-        logging.error(f"Permission denied writing to {output_file}")
+        logger.error(f"Permission denied writing to {output_file}")
     except Exception as e:
-        logging.error(f"Failed to write {output_file}: {str(e)}")
+        logger.error(f"Failed to write {output_file}: {str(e)}")
 
 
 def main() -> None:
-    """Main function to convert Sendmail alias files to Proofpoint LDIF format."""
+    """
+    Main function to convert Sendmail alias files to Proofpoint LDIF format.
+
+    Parses command-line arguments, sets up logging, processes the alias file,
+    generates LDIF content, and writes it to the output file. Logs configuration,
+    alias details, and statistics, exiting with status 1 on errors.
+
+    Exits:
+        0: Successful execution.
+        1: Error (no aliases, no LDIF content, file errors).
+    """
     parser = argparse.ArgumentParser(
         prog="sma2ldif",
         description="Convert Sendmail alias files to Proofpoint LDIF format.",
@@ -559,44 +730,44 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    setup_logging(
+    logger = setup_logging(
         args.log_level,
         args.log_file,
         args.log_max_size,
         args.log_backup_count
     )
 
-    logging.info(f"Logging Level: {args.log_level}")
-    logging.info(f"Max Log Size: {args.log_max_size}")
-    logging.info(f"Log Backup Count: {args.log_backup_count}")
-    logging.info(f"Input File: {args.input_file}")
-    logging.info(f"Output File: {args.output_file}")
-    logging.info(f"Alias Domains: {args.domains}")
-    logging.info(f"MemberOf Groups: {args.groups}")
+    logger.info(f"Logging Level: {args.log_level}")
+    logger.info(f"Max Log Size: {args.log_max_size}")
+    logger.info(f"Log Backup Count: {args.log_backup_count}")
+    logger.info(f"Input File: {args.input_file}")
+    logger.info(f"Output File: {args.output_file}")
+    logger.info(f"Alias Domains: {args.domains}")
+    logger.info(f"MemberOf Groups: {args.groups}")
 
-    parser = AliasParser(args.input_file, logging.getLogger())
+    parser = AliasParser(args.input_file, logger)
 
-    logging.info(f"Total Aliases: {parser.alias_count}")
-    logging.info(f"Longest Alias: {parser.longest}")
-    logging.info(f"Total Bytes: {parser.total_bytes}")
+    logger.info(f"Total Aliases: {parser.alias_count}")
+    logger.info(f"Longest Alias: {parser.longest}")
+    logger.info(f"Total Bytes: {parser.total_bytes}")
 
     aliases = parser.aliases
     if not aliases:
-        logging.error("No aliases to process.")
+        logger.error("No aliases to process.")
         sys.exit(1)
 
     for alias, targets in sorted(aliases.items()):
-        logging.info(f"{alias}: {targets}")
+        logger.info(f"{alias}: {targets}")
 
     ldif_content = generate_pps_ldif(aliases, args.domains, args.groups, args.expand_proxy)
     if ldif_content:
         try:
-            write_ldif_file(ldif_content, args.output_file)
+            write_ldif_file(ldif_content, args.output_file, logger)
         except RuntimeError as e:
-            logging.error(str(e))
+            logger.error(str(e))
             sys.exit(1)
     else:
-        logging.warning("No LDIF content generated.")
+        logger.warning("No LDIF content generated.")
         sys.exit(1)
 
 
