@@ -15,6 +15,7 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone, timedelta
+from importlib.metadata import version, PackageNotFoundError
 from logging import Logger
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -44,6 +45,13 @@ MAXNAME = 256  # Maximum length of an alias address
 MAXATOM = 40  # Maximum number of tokens in an alias
 
 
+def get_version():
+    try:
+        return version("senderstats")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
 class AliasParser:
     """
     A class to parse Sendmail-style alias files, replicating the behavior of
@@ -58,7 +66,8 @@ class AliasParser:
         longest (int): Length of the longest RHS.
     """
 
-    def __init__(self, file_path: str, logger: Optional[logging.Logger] = None, exclude_pattern: str = None, include_pattern: str = None):
+    def __init__(self, file_path: str, logger: Optional[logging.Logger] = None, exclude_pattern: str = None,
+                 include_pattern: str = None):
         """
         Initialize and parse the alias file.
 
@@ -722,9 +731,9 @@ def main() -> None:
         help='List of domains for alias processing (first domain is primary).'
     )
 
-    # Optional arguments group
-    optional = parser.add_argument_group('Optional Arguments')
-    optional.add_argument(
+    # Processing Options
+    processing = parser.add_argument_group('Processing Arguments (Optional)')
+    processing.add_argument(
         '-g', '--groups',
         metavar='<group>',
         dest="groups",
@@ -732,51 +741,61 @@ def main() -> None:
         nargs='+',
         help='List of memberOf groups for LDIF entries (default: none).'
     )
-    optional.add_argument(
+    processing.add_argument(
         '-e', '--expand-proxy',
         dest="expand_proxy",
         action='store_true',
         help='Expand proxyAddresses into unique DN entries.')
-    optional.add_argument(
+    processing.add_argument(
         '--exclude',
         metavar='PATTERN',
         dest='exclude_pattern',
         default=None,
         help='Regular expression pattern to exclude aliases. Use \'=\' before patterns starting with a hyphen. (e.g. --exclude="-(approval|outgoing|request)$")'
     )
-    optional.add_argument(
+    processing.add_argument(
         '--include',
         metavar='PATTERN',
         dest='include_pattern',
         default=None,
         help='Regular expression pattern to include aliases. Use \'=\' before patterns starting with a hyphen. (e.g. --include="-(approval|outgoing|request)$")'
     )
-    optional.add_argument(
+
+    # Logging Options
+    logging = parser.add_argument_group('Logging Arguments (Optional)')
+
+    logging.add_argument(
         '--log-level',
         default=DEFAULT_LOG_LEVEL,
         type=log_level_type,
         choices=['debug', 'info', 'warning', 'error', 'critical'],
         help=f'Set the logging level (default: {DEFAULT_LOG_LEVEL}).'
     )
-    optional.add_argument(
+    logging.add_argument(
         '-l', '--log-file',
         default=DEFAULT_LOG_FILE,
         type=lambda x: validate_file_path(x, check_writable=True),
         help=f'Set the log file location (default: {DEFAULT_LOG_FILE}).'
     )
-    optional.add_argument(
+    logging.add_argument(
         '-s', '--log-max-size',
         type=int,
         default=DEFAULT_MAX_BYTES,
         help=f'Maximum size of log file in bytes before rotation (default: {DEFAULT_MAX_BYTES}).'
     )
-    optional.add_argument(
+    logging.add_argument(
         '-c', '--log-backup-count',
         type=int,
         default=DEFAULT_BACKUP_COUNT,
         help=f'Number of backup log files to keep (default: {DEFAULT_BACKUP_COUNT}).'
     )
-    optional.add_argument(
+
+    # Logging Options
+    misc = parser.add_argument_group('Help / Version Arguments')
+
+    misc.add_argument('--version', action='version', help="Show the program's version and exit",
+                      version=f'SenderStats {get_version()}')
+    misc.add_argument(
         '-h', '--help',
         action='help',
         help='Show this help message and exit.'
@@ -803,15 +822,15 @@ def main() -> None:
     logger.info(f"Alias Domains: {args.domains}")
     logger.info(f"MemberOf Groups: {args.groups}")
 
-    parser = AliasParser(args.input_file, logger, args.exclude_pattern, args.include_pattern)
+    alias_parser = AliasParser(args.input_file, logger, args.exclude_pattern, args.include_pattern)
 
-    logger.info(f"Total Valid Aliases: {parser.alias_count}")
-    logger.info(f"Total Filtered Aliases: {parser.filtered_count}")
-    logger.info(f"Total Invalid Aliases: {parser.invalid_count}")
-    logger.info(f"Longest Alias: {parser.longest}")
-    logger.info(f"Total Bytes: {parser.total_bytes}")
+    logger.info(f"Total Valid Aliases: {alias_parser.alias_count}")
+    logger.info(f"Total Filtered Aliases: {alias_parser.filtered_count}")
+    logger.info(f"Total Invalid Aliases: {alias_parser.invalid_count}")
+    logger.info(f"Longest Alias: {alias_parser.longest}")
+    logger.info(f"Total Bytes: {alias_parser.total_bytes}")
 
-    aliases = parser.aliases
+    aliases = alias_parser.aliases
     if not aliases:
         logger.error("No aliases to process.")
         sys.exit(1)
