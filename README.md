@@ -130,6 +130,7 @@ mail: 1002d@foo.com
 ```
 usage: sma2ldif --alias-file <aliases> --ldif-file <ldif> -d <domain>
                 [<domain> ...] [-g <group> [<group> ...]] [-e]
+                [--exclude PATTERN] [--include PATTERN]
                 [--log-level {debug,info,warning,error,critical}]
                 [-l LOG_FILE] [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT] [-h]
 
@@ -156,6 +157,22 @@ Optional Arguments:
   -e, --expand-proxy                                      Expand
                                                           proxyAddresses into
                                                           unique DN entries.
+  --exclude PATTERN                                       Regular expression
+                                                          pattern to exclude
+                                                          aliases. Use '='
+                                                          before patterns
+                                                          starting with a
+                                                          hyphen. (e.g. --excl
+                                                          ude="-(approval|outg
+                                                          oing|request)$")
+  --include PATTERN                                       Regular expression
+                                                          pattern to include
+                                                          aliases. Use '='
+                                                          before patterns
+                                                          starting with a
+                                                          hyphen. (e.g. --incl
+                                                          ude="-(approval|outg
+                                                          oing|request)$")
   --log-level {debug,info,warning,error,critical}         Set the logging
                                                           level (default:
                                                           warning).
@@ -172,5 +189,4 @@ Optional Arguments:
                                                           (default: 5).
   -h, --help                                              Show this help
                                                           message and exit.
-
 ```
