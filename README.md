@@ -128,65 +128,30 @@ mail: 1002d@foo.com
 ### Usage
 
 ```
-usage: sma2ldif --alias-file <aliases> --ldif-file <ldif> -d <domain>
-                [<domain> ...] [-g <group> [<group> ...]] [-e]
-                [--exclude PATTERN] [--include PATTERN]
-                [--log-level {debug,info,warning,error,critical}]
-                [-l LOG_FILE] [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT] [-h]
+usage: sma2ldif --alias-file <aliases> --ldif-file <ldif> -d <domain> [<domain> ...] [-g <group> [<group> ...]] [-e] [--exclude PATTERN] [--include PATTERN] [--log-level {debug,info,warning,error,critical}] [-l LOG_FILE]
+                [-s LOG_MAX_SIZE] [-c LOG_BACKUP_COUNT] [--version] [-h]
 
 Convert Sendmail alias files to Proofpoint LDIF format.
 
 Required Arguments:
-  --alias-file <aliases>                                  Path to the input
-                                                          Sendmail aliases
-                                                          file.
-  --ldif-file <ldif>                                      Path to the output
-                                                          LDIF file.
-  -d <domain> [<domain> ...], --domains <domain> [<domain> ...]
-                                                          List of domains for
-                                                          alias processing
-                                                          (first domain is
-                                                          primary).
+  --alias-file <aliases>                                         Path to the input Sendmail aliases file.
+  --ldif-file <ldif>                                             Path to the output LDIF file.
+  -d <domain> [<domain> ...], --domains <domain> [<domain> ...]  List of domains for alias processing (first domain is primary).
 
-Optional Arguments:
-  -g <group> [<group> ...], --groups <group> [<group> ...]
-                                                          List of memberOf
-                                                          groups for LDIF
-                                                          entries (default:
-                                                          none).
-  -e, --expand-proxy                                      Expand
-                                                          proxyAddresses into
-                                                          unique DN entries.
-  --exclude PATTERN                                       Regular expression
-                                                          pattern to exclude
-                                                          aliases. Use '='
-                                                          before patterns
-                                                          starting with a
-                                                          hyphen. (e.g. --excl
-                                                          ude="-(approval|outg
-                                                          oing|request)$")
-  --include PATTERN                                       Regular expression
-                                                          pattern to include
-                                                          aliases. Use '='
-                                                          before patterns
-                                                          starting with a
-                                                          hyphen. (e.g. --incl
-                                                          ude="-(approval|outg
-                                                          oing|request)$")
-  --log-level {debug,info,warning,error,critical}         Set the logging
-                                                          level (default:
-                                                          warning).
-  -l LOG_FILE, --log-file LOG_FILE                        Set the log file
-                                                          location (default:
-                                                          sma2ldif.log).
-  -s LOG_MAX_SIZE, --log-max-size LOG_MAX_SIZE            Maximum size of log
-                                                          file in bytes before
-                                                          rotation (default:
-                                                          10485760).
-  -c LOG_BACKUP_COUNT, --log-backup-count LOG_BACKUP_COUNT
-                                                          Number of backup log
-                                                          files to keep
-                                                          (default: 5).
-  -h, --help                                              Show this help
-                                                          message and exit.
+Processing Arguments (Optional):
+  -g <group> [<group> ...], --groups <group> [<group> ...]       List of memberOf groups for LDIF entries (default: none).
+  -e, --expand-proxy                                             Expand proxyAddresses into unique DN entries.
+  --exclude PATTERN                                              Regular expression pattern to exclude aliases. Use '=' before patterns starting with a hyphen. (e.g. --exclude="-(approval|outgoing|request)$")
+  --include PATTERN                                              Regular expression pattern to include aliases. Use '=' before patterns starting with a hyphen. (e.g. --include="-(approval|outgoing|request)$")
+
+Logging Arguments (Optional):
+  --log-level {debug,info,warning,error,critical}                Set the logging level (default: warning).
+  -l LOG_FILE, --log-file LOG_FILE                               Set the log file location (default: sma2ldif.log).
+  -s LOG_MAX_SIZE, --log-max-size LOG_MAX_SIZE                   Maximum size of log file in bytes before rotation (default: 10485760).
+  -c LOG_BACKUP_COUNT, --log-backup-count LOG_BACKUP_COUNT       Number of backup log files to keep (default: 5).
+
+Help / Version Arguments:
+  --version                                                      Show the program's version and exit
+  -h, --help                                                     Show this help message and exit.
+
 ```
