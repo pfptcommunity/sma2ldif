@@ -47,7 +47,7 @@ MAXATOM = 40  # Maximum number of tokens in an alias
 
 def get_version():
     try:
-        return version("senderstats")
+        return version("sma2ldif")
     except PackageNotFoundError:
         return "0.0.0"
 
