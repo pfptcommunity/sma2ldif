@@ -94,7 +94,7 @@ proxyAddresses: 1002d@foo.com
 If other domains are listed with the ```-d``` and the ```--expand-proxy``` argument is used the proxyAddresses would be expanded to their own DN entries. 
 
 ```
-sma2ldif --alias-file /etc/aliases --ldif-file /tmp/aliases.ldif -d acme.com, example.com, foo.com
+sma2ldif --alias-file /etc/aliases --ldif-file /tmp/aliases.ldif -d acme.com, example.com, foo.com --expand-proxy
 ```
 
 The result would look similar to the following.
