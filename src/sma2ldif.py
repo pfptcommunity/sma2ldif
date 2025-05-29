@@ -794,7 +794,7 @@ def main() -> None:
     misc = parser.add_argument_group('Help / Version Arguments')
 
     misc.add_argument('--version', action='version', help="Show the program's version and exit",
-                      version=f'SenderStats {get_version()}')
+                      version=f'sma2ldif {get_version()}')
     misc.add_argument(
         '-h', '--help',
         action='help',
