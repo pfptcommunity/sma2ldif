@@ -67,7 +67,7 @@ class AliasParser:
     """
 
     def __init__(self, file_path: str, logger: Optional[logging.Logger] = None, exclude_pattern: str = None,
-                 include_pattern: str = None):
+                 include_pattern: str = None, exclude_target: str = None, include_target: str = None):
         """
         Initialize and parse the alias file.
 
@@ -94,6 +94,8 @@ class AliasParser:
         self.__invalid_count: int = 0
         self.__exclude_pattern = None
         self.__include_pattern = None
+        self.__exclude_target = None
+        self.__include_target = None
 
         # Set up logger
         if logger is None:
@@ -119,6 +121,12 @@ class AliasParser:
             except re.error as e:
                 self.__logger.error(f"Invalid include pattern '{include_pattern}': {str(e)}")
                 raise
+
+        if exclude_target:
+            self.__exclude_target = exclude_target
+
+        if include_target:
+            self.__include_target = include_target
 
         # Parse the file during initialization
         try:
@@ -318,24 +326,6 @@ class AliasParser:
         lhs = lhs.strip()
         rhs = rhs.strip()
 
-        # Check if LHS matches the exclude pattern
-        if self.__exclude_pattern and self.__exclude_pattern.search(lhs):
-            self.__logger.debug(f"File {self.__file_path} Line {self.__line_number}: Excluded alias: {lhs}")
-            self.__filtered_count += 1
-            return
-
-        # Check if LHS matches the include pattern (if provided)
-        if self.__include_pattern and not self.__include_pattern.search(lhs):
-            self.__logger.debug(f"File {self.__file_path} Line {self.__line_number}: Skipped non-included alias: {lhs}")
-            self.__filtered_count += 1
-            return
-
-        # Validate LHS (mimicking parseaddr)
-        if not self.__is_valid_lhs(lhs):
-            self.__logger.warning(f"File {self.__file_path} Line {self.__line_number}: Illegal alias name: {lhs[:40]}")
-            self.__invalid_count += 1
-            return
-
         # Check if RHS is empty
         if not rhs:
             self.__logger.warning(
@@ -346,6 +336,72 @@ class AliasParser:
         # Special case: lowercase 'postmaster'
         if lhs.lower() == 'postmaster':
             lhs = 'postmaster'
+
+        var_map = {
+            "rhs": rhs,
+            "lhs": lhs
+        }
+
+        # Check if LHS matches the exclude pattern
+        if self.__exclude_pattern and self.__exclude_pattern.search(lhs):
+            try:
+                self.__logger.debug(
+                    f"File {self.__file_path} Line {self.__line_number}: Excluded alias: {lhs}:{rhs} (matched --exclude pattern: '{self.__exclude_pattern.pattern}')")
+                self.__filtered_count += 1
+                return
+            except Exception as e:
+                self.__logger.error(f"Error applying --exclude pattern '{self.__exclude_pattern.pattern}': {str(e)}")
+
+        # Check if LHS matches the include pattern (if provided)
+        if self.__include_pattern and not self.__include_pattern.search(lhs):
+            try:
+                self.__logger.debug(
+                    f"File {self.__file_path} Line {self.__line_number}: Skipped non-included alias: {lhs}:{rhs} (did not match --include pattern: '{self.__include_pattern.pattern}')")
+                self.__filtered_count += 1
+                return
+            except Exception as e:
+                self.__logger.error(f"Error applying --include pattern '{self.__include_pattern.pattern}': {str(e)}")
+        else:
+            if self.__include_pattern:
+                self.__logger.debug(
+                    f"File {self.__file_path} Line {self.__line_number}: Processing included alias: {lhs}:{rhs} (matched --include pattern: '{self.__include_pattern.pattern}')")
+
+        # Check if RHS matches the exclude pattern
+        if self.__exclude_target:
+            exclude_target = None
+            try:
+                exclude_target = substitute_variables(self.__exclude_target, var_map)
+                exclude_target_pattern = re.compile(exclude_target)
+                if exclude_target_pattern.search(rhs):
+                    self.__logger.debug(
+                        f"File {self.__file_path} Line {self.__line_number}: Excluded alias: {lhs}:{rhs} (matched --exclude-target pattern: '{exclude_target}')")
+                    self.__filtered_count += 1
+                    return
+            except re.error as e:
+                self.__logger.error(f"Invalid --exclude-target pattern '{exclude_target}': {str(e)}")
+
+        # Check if RHS matches the include pattern (if provided)
+        if self.__include_target:
+            include_target = None
+            try:
+                include_target = substitute_variables(self.__include_target, var_map)
+                include_target_pattern = re.compile(include_target)
+                if not include_target_pattern.search(rhs):
+                    self.__logger.debug(
+                        f"File {self.__file_path} Line {self.__line_number}: Skipped non-included alias: {lhs}:{rhs} (did not match --include-target pattern: '{include_target}')")
+                    self.__filtered_count += 1
+                    return
+                else:
+                    self.__logger.debug(
+                        f"File {self.__file_path} Line {self.__line_number}: Processing included alias: {lhs}:{rhs} (matched --include-target pattern: '{include_target}')")
+            except re.error as e:
+                self.__logger.error(f"Invalid --include-target pattern '{include_target}': {str(e)}")
+
+        # Validate LHS (mimicking parseaddr)
+        if not self.__is_valid_lhs(lhs):
+            self.__logger.warning(f"File {self.__file_path} Line {self.__line_number}: Illegal alias name: {lhs[:40]}")
+            self.__invalid_count += 1
+            return
 
         # Store the alias
         self.__aliases[lhs] = rhs
@@ -576,6 +632,24 @@ def setup_logging(log_level: str, log_file: str, max_bytes: int, backup_count: i
     return logger
 
 
+def substitute_variables(pattern: str, vars_dict: dict[str, str]):
+    """
+    Safely substitute variables in a pattern like '^${rhs}@myregexpattern$'.
+    Escapes variable values to prevent regex injection.
+    """
+
+    def replace_match(match):
+        var_name = match.group(1)  # Extract variable name from ${var}
+        if var_name not in vars_dict:
+            raise ValueError(f"Undefined variable: {var_name}")
+        # Escape the variable value to make it safe for regex
+        return re.escape(vars_dict[var_name])
+
+    # Match ${variable} placeholders
+    substituted = re.sub(r'\${(\w+)}', replace_match, pattern)
+    return substituted
+
+
 def create_ldif_entry(alias: str, domain: str, groups: List[str], proxy_domains: Optional[List[str]] = None) -> str:
     """
     Create a single LDIF entry for Proofpoint.
@@ -760,6 +834,20 @@ def main() -> None:
         default=None,
         help='Regular expression pattern to include aliases. Use \'=\' before patterns starting with a hyphen. (e.g. --include="-(approval|outgoing|request)$")'
     )
+    processing.add_argument(
+        '--exclude-target',
+        metavar='PATTERN',
+        dest='exclude_target',
+        default=None,
+        help='Regular expression pattern to exclude aliases by alias target. The variable ${lhs} can be used as a reference to the alias name. Use \'=\' before patterns starting with a hyphen. (e.g. --exclude-target="${lhs}@domain"'
+    )
+    processing.add_argument(
+        '--include-target',
+        metavar='PATTERN',
+        dest='include_target',
+        default=None,
+        help='Regular expression pattern to include aliases by alias target. The variable ${lhs} can be used as a reference to the alias name. Use \'=\' before patterns starting with a hyphen. (e.g. --include-target="${lhs}@domain"'
+    )
 
     # Logging Options
     logging = parser.add_argument_group('Logging Arguments (Optional)')
@@ -822,7 +910,8 @@ def main() -> None:
     logger.info(f"Alias Domains: {args.domains}")
     logger.info(f"MemberOf Groups: {args.groups}")
 
-    alias_parser = AliasParser(args.input_file, logger, args.exclude_pattern, args.include_pattern)
+    alias_parser = AliasParser(args.input_file, logger, args.exclude_pattern, args.include_pattern, args.exclude_target,
+                               args.include_target)
 
     logger.info(f"Total Valid Aliases: {alias_parser.alias_count}")
     logger.info(f"Total Filtered Aliases: {alias_parser.filtered_count}")
